@@ -1,9 +1,7 @@
 // ==UserScript==
-// @name         Torn Alliance Shared Chat
+// @name         FLUX Shared Chat
 // @namespace    almanac.shared.chat
-// @updateURL   https://github.com/Dannebox/Shared-chat/raw/refs/heads/main/Chat.user.js
-// @downloadURL https://github.com/Dannebox/Shared-chat/raw/refs/heads/main/Chat.user.js
-// @version      0.3.2
+// @version      0.3.3
 // @description  Secure shared chat for approved Torn factions using CSP-safe HTTP polling; does not scrape Torn pages.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -96,6 +94,15 @@
             }
             #${PANEL_ID} .ac-title { font-weight: 700; flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
             #${PANEL_ID} .ac-online { font-size: 10px; color: #9ab3cb; }
+            #${PANEL_ID} .ac-new-indicator {
+                display: none;
+                min-width: 8px;
+                height: 8px;
+                border-radius: 50%;
+                background: #b33;
+                box-shadow: 0 0 0 2px rgba(179,51,51,.18);
+            }
+            #${PANEL_ID} .ac-new-indicator.ac-show { display: inline-block; }
             #${PANEL_ID} .ac-header button {
                 border: 0; background: transparent; color: #ddd; cursor: pointer;
                 font-size: 16px; width: 24px; height: 24px; line-height: 20px;
@@ -130,8 +137,10 @@
                 font: inherit;
             }
             #${PANEL_ID} .ac-send {
-                width: 38px; height: 34px; border: 1px solid #111; border-radius: 3px;
+                width: 58px; min-width: 58px; height: 34px;
+                border: 1px solid #111; border-radius: 3px;
                 background: #405d79; color: #fff; cursor: pointer;
+                font-weight: 700;
             }
             #${PANEL_ID} .ac-send:disabled { opacity: .45; cursor: default; }
             #${PANEL_ID} .ac-login {
@@ -239,11 +248,13 @@
         const header = el('div', 'ac-header');
         const title = el('div', 'ac-title', state.roomName);
         const online = el('div', 'ac-online', 'offline');
+        const newIndicator = el('span', 'ac-new-indicator');
+        newIndicator.title = 'New messages';
         const min = el('button', '', '—');
         min.type = 'button'; min.title = 'Minimize';
         const close = el('button', '', '×');
         close.type = 'button'; close.title = 'Close';
-        header.append(title, online, min, close);
+        header.append(title, online, newIndicator, min, close);
 
         const status = el('div', 'ac-status', 'Not connected');
         const body = el('div', 'ac-body');
@@ -257,11 +268,11 @@
         composer.append(textarea, send);
 
         const login = el('div', 'ac-login');
-        const loginTitle = el('h3', '', 'Flux Chat authentication');
+        const loginTitle = el('h3', '', 'Alliance Chat authentication');
         const loginInfo = el(
             'p',
             '',
-            'Create a dedicated Public Access API key for Flux Chat, then paste it below.'
+            'Create a dedicated Public Access API key for Alliance Chat, then paste it below.'
         );
 
         const actions = el('div', 'ac-login-actions');
@@ -297,7 +308,7 @@
         const privacyKey = el(
             'p',
             '',
-            'API key: used for one Torn API v2 key/info request at login. It is not stored by Flux Chat.'
+            'API key: used for one Torn API v2 key/info request at login. It is not stored by Alliance Chat.'
         );
         const privacyData = el(
             'p',
@@ -324,7 +335,7 @@
 
         panel.append(header, status, body, composer, login);
         document.body.appendChild(panel);
-        ui = { panel, header, title, online, min, close, status, body, textarea, send, login, input, loginButton, loginError };
+        ui = { panel, header, title, online, newIndicator, min, close, status, body, textarea, send, login, input, loginButton, loginError };
 
         const savedUi = loadUiState();
 
@@ -347,6 +358,13 @@
 
         if (savedUi.minimized) panel.classList.add('ac-minimized');
         if (savedUi.visible) panel.classList.add('ac-visible');
+
+        newIndicator.addEventListener('click', (e) => {
+            e.stopPropagation();
+            state.unread = 0;
+            updateBadge();
+            scrollBottom();
+        });
 
         min.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -479,6 +497,15 @@
             console.log('[AllianceChat] Launcher clicked');
 
             buildPanel();
+
+            const isVisible = ui.panel.classList.contains('ac-visible');
+
+            if (isVisible) {
+                ui.panel.classList.remove('ac-visible');
+                saveUiState({ visible: false });
+                schedulePoll(POLL_CLOSED_MS);
+                return;
+            }
 
             ui.panel.classList.add('ac-visible');
             ui.panel.classList.remove('ac-minimized');
@@ -787,6 +814,8 @@
                 const fromOtherUser = Number(msg.sender_id) !== Number(state.me?.id);
 
                 if ((panelClosed || minimized) && fromOtherUser) {
+                    // In-page notification only: no sound, OS notification,
+                    // title flashing, focus stealing, or background alerting.
                     newUnread++;
                 }
             }
@@ -1006,9 +1035,16 @@
     function updateBadge() {
         const launcher = document.getElementById(LAUNCHER_ID);
         const badge = launcher?.querySelector('.ac-badge');
-        if (!badge) return;
-        badge.textContent = state.unread > 99 ? '99+' : String(state.unread);
-        badge.classList.toggle('ac-show', state.unread > 0);
+        if (badge) {
+            badge.textContent = state.unread > 99 ? '99+' : String(state.unread);
+            badge.classList.toggle('ac-show', state.unread > 0);
+        }
+        updateNewIndicator();
+    }
+
+    function updateNewIndicator() {
+        if (!ui.newIndicator) return;
+        ui.newIndicator.classList.toggle('ac-show', state.unread > 0);
     }
 
     function boot() {
