@@ -20,7 +20,7 @@
     'use strict';
 
     // CHANGE THIS to your HTTPS hostname. Do not put any secrets in this file.
-    const API_BASE = 'http://127.0.0.1:8765';
+    const API_BASE = 'https://chat.shiroshura.com';
     const TOKEN_KEY = 'alliance_chat_session_v1';
     const UI_STATE_KEY = 'alliance_chat_ui_state_v1';
     const PANEL_ID = 'almanac-alliance-chat';
