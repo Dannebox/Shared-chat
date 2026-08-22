@@ -3,13 +3,14 @@
 // @namespace    almanac.shared.chat
 // @updateURL   https://github.com/Dannebox/Shared-chat/raw/refs/heads/main/Chat.user.js
 // @downloadURL https://github.com/Dannebox/Shared-chat/raw/refs/heads/main/Chat.user.js
-// @version      0.3.3
+// @version      0.3.7
 // @description  Secure shared chat for approved Torn factions using CSP-safe HTTP polling; does not scrape Torn pages.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
+// @grant        GM_addValueChangeListener
 // @grant        GM.xmlHttpRequest
 // @connect      127.0.0.1
 // @connect      chat.shiroshura.com
@@ -26,7 +27,7 @@
     const PANEL_ID = 'almanac-alliance-chat';
     const LAUNCHER_ID = 'almanac-alliance-chat-launcher';
     const POLL_OPEN_MS = 3000;
-    const POLL_CLOSED_MS = 60000;
+    const POLL_CLOSED_MS = 10000;
 
     const state = {
         token: GM_getValue(TOKEN_KEY, ''),
@@ -96,15 +97,6 @@
             }
             #${PANEL_ID} .ac-title { font-weight: 700; flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
             #${PANEL_ID} .ac-online { font-size: 10px; color: #9ab3cb; }
-            #${PANEL_ID} .ac-new-indicator {
-                display: none;
-                min-width: 8px;
-                height: 8px;
-                border-radius: 50%;
-                background: #b33;
-                box-shadow: 0 0 0 2px rgba(179,51,51,.18);
-            }
-            #${PANEL_ID} .ac-new-indicator.ac-show { display: inline-block; }
             #${PANEL_ID} .ac-header button {
                 border: 0; background: transparent; color: #ddd; cursor: pointer;
                 font-size: 16px; width: 24px; height: 24px; line-height: 20px;
@@ -118,6 +110,26 @@
             #${PANEL_ID} .ac-body {
                 flex: 1; overflow-y: auto; overflow-x: hidden;
                 padding: 8px; box-sizing: border-box; background: #26292d;
+                scrollbar-width: thin;
+                scrollbar-color: #5d6268 #202225;
+            }
+
+            #${PANEL_ID} .ac-body::-webkit-scrollbar {
+                width: 7px;
+            }
+
+            #${PANEL_ID} .ac-body::-webkit-scrollbar-track {
+                background: #202225;
+            }
+
+            #${PANEL_ID} .ac-body::-webkit-scrollbar-thumb {
+                background: #5d6268;
+                border-radius: 6px;
+                border: 1px solid #202225;
+            }
+
+            #${PANEL_ID} .ac-body::-webkit-scrollbar-thumb:hover {
+                background: #737980;
             }
             #${PANEL_ID} .ac-msg { margin: 0 0 7px 0; word-break: break-word; line-height: 1.32; }
             #${PANEL_ID} .ac-meta { display: flex; align-items: baseline; gap: 5px; margin-bottom: 1px; }
@@ -187,10 +199,12 @@
             }
             #${LAUNCHER_ID}:hover { filter: brightness(1.15); }
             #${LAUNCHER_ID} .ac-badge {
-                display: none; position: absolute; top: -5px; right: -5px;
-                min-width: 16px; height: 16px; padding: 0 3px; border-radius: 8px;
-                background: #b33; color: white; font: bold 9px/16px Arial, sans-serif;
+                display: none; position: absolute; top: -7px; right: -7px;
+                min-width: 20px; height: 20px; padding: 0 5px; border-radius: 10px;
+                background: #b33; color: white; font: bold 11px/20px Arial, sans-serif;
                 box-sizing: border-box;
+                border: 2px solid #202225;
+                box-shadow: 0 1px 4px rgba(0,0,0,.6);
             }
             #${LAUNCHER_ID} .ac-badge.ac-show { display: block; }
             .ac-launcher-floating {
@@ -233,6 +247,51 @@
         GM_setValue(UI_STATE_KEY, { ...loadUiState(), ...partial });
     }
 
+    function applySyncedUiState(saved) {
+        if (!ui.panel || !saved || typeof saved !== 'object') return;
+
+        const panel = ui.panel;
+        panel.dataset.syncingUi = '1';
+
+        if (Number.isFinite(saved.width)) {
+            panel.style.width = `${Math.max(260, Math.min(saved.width, window.innerWidth - 16))}px`;
+        }
+
+        if (Number.isFinite(saved.height)) {
+            panel.style.height = `${Math.max(220, Math.min(saved.height, window.innerHeight - 16))}px`;
+        }
+
+        if (Number.isFinite(saved.left) && Number.isFinite(saved.top)) {
+            const pos = clampPanelPosition(panel, saved.left, saved.top);
+            panel.style.left = `${pos.left}px`;
+            panel.style.top = `${pos.top}px`;
+            panel.style.right = 'auto';
+            panel.style.bottom = 'auto';
+            panel.dataset.dragged = '1';
+        }
+
+        panel.classList.remove('ac-minimized');
+
+        if (saved.visible) {
+            panel.classList.add('ac-visible');
+
+            // Only initialize networking immediately if this Torn tab is active.
+            // Unfocused/hidden tabs keep the UI state in sync without making requests.
+            if (isPageActive()) {
+                startIfNeeded();
+            }
+        } else {
+            panel.classList.remove('ac-visible');
+            schedulePoll(POLL_CLOSED_MS);
+        }
+
+        // Prevent ResizeObserver from reflecting the remote change straight back
+        // into GM storage and creating a cross-tab feedback loop.
+        setTimeout(() => {
+            if (panel) delete panel.dataset.syncingUi;
+        }, 300);
+    }
+
     function clampPanelPosition(panel, left, top) {
         const maxLeft = Math.max(0, window.innerWidth - panel.offsetWidth);
         const maxTop = Math.max(0, window.innerHeight - 38);
@@ -250,13 +309,11 @@
         const header = el('div', 'ac-header');
         const title = el('div', 'ac-title', state.roomName);
         const online = el('div', 'ac-online', 'offline');
-        const newIndicator = el('span', 'ac-new-indicator');
-        newIndicator.title = 'New messages';
         const min = el('button', '', '—');
         min.type = 'button'; min.title = 'Minimize';
         const close = el('button', '', '×');
         close.type = 'button'; close.title = 'Close';
-        header.append(title, online, newIndicator, min, close);
+        header.append(title, online, min, close);
 
         const status = el('div', 'ac-status', 'Not connected');
         const body = el('div', 'ac-body');
@@ -337,7 +394,7 @@
 
         panel.append(header, status, body, composer, login);
         document.body.appendChild(panel);
-        ui = { panel, header, title, online, newIndicator, min, close, status, body, textarea, send, login, input, loginButton, loginError };
+        ui = { panel, header, title, online, min, close, status, body, textarea, send, login, input, loginButton, loginError };
 
         const savedUi = loadUiState();
 
@@ -361,17 +418,12 @@
         if (savedUi.minimized) panel.classList.add('ac-minimized');
         if (savedUi.visible) panel.classList.add('ac-visible');
 
-        newIndicator.addEventListener('click', (e) => {
-            e.stopPropagation();
-            state.unread = 0;
-            updateBadge();
-            scrollBottom();
-        });
-
         min.addEventListener('click', (e) => {
             e.stopPropagation();
-            panel.classList.toggle('ac-minimized');
-            saveUiState({ minimized: panel.classList.contains('ac-minimized') });
+            panel.classList.remove('ac-visible');
+            panel.classList.remove('ac-minimized');
+            saveUiState({ visible: false, minimized: false });
+            schedulePoll(POLL_CLOSED_MS);
         });
         close.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -400,6 +452,7 @@
         let resizeSaveTimer = null;
         const resizeObserver = new ResizeObserver(() => {
             if (panel.classList.contains('ac-minimized')) return;
+            if (panel.dataset.syncingUi === '1') return;
 
             clearTimeout(resizeSaveTimer);
             resizeSaveTimer = setTimeout(() => {
@@ -1037,16 +1090,16 @@
     function updateBadge() {
         const launcher = document.getElementById(LAUNCHER_ID);
         const badge = launcher?.querySelector('.ac-badge');
-        if (badge) {
-            badge.textContent = state.unread > 99 ? '99+' : String(state.unread);
-            badge.classList.toggle('ac-show', state.unread > 0);
-        }
-        updateNewIndicator();
+        if (!badge) return;
+        badge.textContent = state.unread > 99 ? '99+' : String(state.unread);
+        badge.classList.toggle('ac-show', state.unread > 0);
     }
 
-    function updateNewIndicator() {
-        if (!ui.newIndicator) return;
-        ui.newIndicator.classList.toggle('ac-show', state.unread > 0);
+    if (typeof GM_addValueChangeListener === 'function') {
+        GM_addValueChangeListener(UI_STATE_KEY, (_name, _oldValue, newValue, remote) => {
+            if (!remote) return;
+            applySyncedUiState(newValue);
+        });
     }
 
     function boot() {
@@ -1100,6 +1153,12 @@
 
     const wakePolling = () => {
         if (!state.token || !isPageActive()) return;
+
+        if (ui.panel?.classList.contains('ac-visible') && !state.cryptoKey) {
+            startIfNeeded();
+            return;
+        }
+
         schedulePoll(0);
     };
 
