@@ -1,6 +1,8 @@
 // ==UserScript==
 // @name         Torn Alliance Shared Chat
 // @namespace    almanac.shared.chat
+// @updateURL   https://github.com/Dannebox/Shared-chat/blob/main/Chat.user.js
+// @downloadURL https://github.com/Dannebox/Shared-chat/blob/main/Chat.user.js
 // @version      0.3.2
 // @description  Secure shared chat for approved Torn factions using CSP-safe HTTP polling; does not scrape Torn pages.
 // @match        https://www.torn.com/*
