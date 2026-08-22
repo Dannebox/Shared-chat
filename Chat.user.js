@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Torn Alliance Shared Chat
 // @namespace    almanac.shared.chat
-// @updateURL   https://github.com/Dannebox/Shared-chat/blob/main/Chat.user.js
-// @downloadURL https://github.com/Dannebox/Shared-chat/blob/main/Chat.user.js
+// @updateURL   https://github.com/Dannebox/Shared-chat/raw/refs/heads/main/Chat.user.js
+// @downloadURL https://github.com/Dannebox/Shared-chat/raw/refs/heads/main/Chat.user.js
 // @version      0.3.2
 // @description  Secure shared chat for approved Torn factions using CSP-safe HTTP polling; does not scrape Torn pages.
 // @match        https://www.torn.com/*
@@ -297,7 +297,7 @@
         const privacyKey = el(
             'p',
             '',
-            'API key: used for one Torn API v2 key/info request at login. It is not stored by Alliance Chat.'
+            'API key: used for one Torn API v2 key/info request at login. It is not stored by Flux Chat.'
         );
         const privacyData = el(
             'p',
