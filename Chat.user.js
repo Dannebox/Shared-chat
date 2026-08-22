@@ -3,7 +3,7 @@
 // @namespace    almanac.shared.chat
 // @updateURL   https://github.com/Dannebox/Shared-chat/raw/refs/heads/main/Chat.user.js
 // @downloadURL https://github.com/Dannebox/Shared-chat/raw/refs/heads/main/Chat.user.js
-// @version      0.1.37
+// @version      0.1.39
 // @description  Secure shared chat for approved Torn factions using CSP-safe HTTP polling; does not scrape Torn pages.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -24,10 +24,18 @@
     const API_BASE = 'https://chat.shiroshura.com';
     const TOKEN_KEY = 'alliance_chat_session_v1';
     const UI_STATE_KEY = 'alliance_chat_ui_state_v1';
+    const THEME_KEY = 'alliance_chat_theme_v1';
     const PANEL_ID = 'almanac-alliance-chat';
     const LAUNCHER_ID = 'almanac-alliance-chat-launcher';
     const POLL_OPEN_MS = 3000;
     const POLL_CLOSED_MS = 10000;
+
+    const THEME_ASSETS = {
+        almanac: { header: 'https://i.imgur.com/DPf5q8q.png', background: 'https://i.imgur.com/B2V4Z4m.png' },
+        flux: { header: 'https://i.imgur.com/9MuH7Sf.png', background: 'https://i.imgur.com/KMCLt8U.png' }
+    };
+
+    const THEMES = new Set(['default', 'almanac', 'flux']);
 
     const state = {
         token: GM_getValue(TOKEN_KEY, ''),
@@ -44,6 +52,7 @@
         lastCursor: 0,
         seenMessageIds: new Set(),
         factionNames: {},
+        theme: THEMES.has(GM_getValue(THEME_KEY, 'default')) ? GM_getValue(THEME_KEY, 'default') : 'default',
     };
 
     let ui = {};
@@ -54,6 +63,28 @@
         style.id = 'almanac-alliance-chat-css';
         style.textContent = `
             #${PANEL_ID} {
+                --ac-panel-bg: #202225;
+                --ac-body-bg: #26292d;
+                --ac-header-top: #3b4b5f;
+                --ac-header-bottom: #263546;
+                --ac-status-bg: #181a1d;
+                --ac-composer-bg: #1d1f22;
+                --ac-input-bg: #303338;
+                --ac-border: #111;
+                --ac-text: #ddd;
+                --ac-message-text: #e3e3e3;
+                --ac-muted: #9aa0a6;
+                --ac-online: #9ab3cb;
+                --ac-name: #77a7d5;
+                --ac-faction: #8c9298;
+                --ac-time: #777;
+                --ac-accent: #405d79;
+                --ac-scroll-track: #202225;
+                --ac-scroll-thumb: #5d6268;
+                --ac-scroll-thumb-hover: #737980;
+                --ac-theme-header-image: none;
+                --ac-theme-bg-image: none;
+
                 position: fixed;
                 width: 300px;
                 height: 540px;
@@ -70,8 +101,8 @@
                 overflow: hidden;
                 border: 1px solid rgba(0,0,0,.55);
                 border-radius: 6px 6px 0 0;
-                background: #202225;
-                color: #ddd;
+                background: var(--ac-panel-bg);
+                color: var(--ac-text);
                 box-shadow: 0 2px 14px rgba(0,0,0,.55);
                 font-family: Arial, sans-serif;
                 font-size: 12px;
@@ -88,30 +119,41 @@
                 align-items: center;
                 gap: 7px;
                 padding: 0 8px;
-                background: linear-gradient(#3b4b5f, #263546);
-                border-bottom: 1px solid #111;
+                background:
+                    linear-gradient(rgba(4, 10, 18, 0.50), rgba(4, 10, 18, 0.50)),
+                    var(--ac-theme-header-image),
+                    linear-gradient(var(--ac-header-top), var(--ac-header-bottom));
+                background-size: cover;
+                background-position: center;
+                border-bottom: 1px solid var(--ac-border);
                 color: #fff;
                 cursor: move;
                 user-select: none;
                 box-sizing: border-box;
             }
             #${PANEL_ID} .ac-title { font-weight: 700; flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-            #${PANEL_ID} .ac-online { font-size: 10px; color: #9ab3cb; }
+            #${PANEL_ID} .ac-online { font-size: 10px; color: var(--ac-online); }
             #${PANEL_ID} .ac-header button {
-                border: 0; background: transparent; color: #ddd; cursor: pointer;
+                border: 0; background: transparent; color: var(--ac-text); cursor: pointer;
                 font-size: 16px; width: 24px; height: 24px; line-height: 20px;
             }
             #${PANEL_ID} .ac-header button:hover { color: #fff; }
             #${PANEL_ID} .ac-status {
                 min-height: 22px; padding: 4px 8px; box-sizing: border-box;
-                background: #181a1d; color: #9aa0a6; border-bottom: 1px solid #111;
+                background: var(--ac-status-bg); color: var(--ac-muted); border-bottom: 1px solid var(--ac-border);
                 font-size: 10px;
             }
             #${PANEL_ID} .ac-body {
                 flex: 1; overflow-y: auto; overflow-x: hidden;
-                padding: 8px; box-sizing: border-box; background: #26292d;
+                padding: 8px; box-sizing: border-box;
+                background:
+                    linear-gradient(rgba(5, 10, 18, 0.73), rgba(5, 10, 18, 0.73)),
+                    var(--ac-theme-bg-image),
+                    var(--ac-body-bg);
+                background-size: cover;
+                background-position: center;
                 scrollbar-width: thin;
-                scrollbar-color: #5d6268 #202225;
+                scrollbar-color: var(--ac-scroll-thumb) var(--ac-scroll-track);
             }
 
             #${PANEL_ID} .ac-body::-webkit-scrollbar {
@@ -119,48 +161,53 @@
             }
 
             #${PANEL_ID} .ac-body::-webkit-scrollbar-track {
-                background: #202225;
+                background: var(--ac-scroll-track);
             }
 
             #${PANEL_ID} .ac-body::-webkit-scrollbar-thumb {
-                background: #5d6268;
+                background: var(--ac-scroll-thumb);
                 border-radius: 6px;
-                border: 1px solid #202225;
+                border: 1px solid var(--ac-scroll-track);
             }
 
             #${PANEL_ID} .ac-body::-webkit-scrollbar-thumb:hover {
-                background: #737980;
+                background: var(--ac-scroll-thumb-hover);
             }
             #${PANEL_ID} .ac-msg { margin: 0 0 7px 0; word-break: break-word; line-height: 1.32; }
             #${PANEL_ID} .ac-meta { display: flex; align-items: baseline; gap: 5px; margin-bottom: 1px; }
-            #${PANEL_ID} .ac-name { color: #77a7d5; font-weight: 700; text-decoration: none; cursor: pointer; }
+            #${PANEL_ID} .ac-name { color: var(--ac-name); font-weight: 700; text-decoration: none; cursor: pointer; }
             #${PANEL_ID} .ac-name:hover { text-decoration: underline; }
-            #${PANEL_ID} .ac-time { color: #777; font-size: 9px; }
-            #${PANEL_ID} .ac-faction { color: #8c9298; font-size: 9px; }
-            #${PANEL_ID} .ac-text { color: #e3e3e3; white-space: pre-wrap; }
+            #${PANEL_ID} .ac-time { color: var(--ac-time); font-size: 9px; }
+            #${PANEL_ID} .ac-faction { color: var(--ac-faction); font-size: 9px; }
+            #${PANEL_ID} .ac-text { color: var(--ac-message-text); white-space: pre-wrap; }
+            #${PANEL_ID} .ac-title,
+            #${PANEL_ID} .ac-name,
+            #${PANEL_ID} .ac-text {
+                text-shadow: 0 1px 2px rgba(0,0,0,.85);
+            }
             #${PANEL_ID} .ac-system { color: #a8b3be; font-style: italic; margin: 6px 0; }
             #${PANEL_ID} .ac-error { color: #e58d8d; }
             #${PANEL_ID} .ac-composer {
                 display: flex; align-items: flex-end; gap: 5px;
-                padding: 6px; background: #1d1f22; border-top: 1px solid #111;
+                padding: 6px; background: var(--ac-composer-bg); border-top: 1px solid #111;
             }
             #${PANEL_ID} .ac-composer textarea {
                 flex: 1; resize: none; min-height: 34px; max-height: 90px;
                 border: 1px solid #111; border-radius: 3px; padding: 7px;
-                box-sizing: border-box; background: #303338; color: #eee; outline: none;
+                box-sizing: border-box; background: var(--ac-input-bg); color: #eee; outline: none;
                 font: inherit;
             }
             #${PANEL_ID} .ac-send {
                 width: 58px; min-width: 58px; height: 34px;
                 border: 1px solid #111; border-radius: 3px;
-                background: #405d79; color: #fff; cursor: pointer;
+                background: var(--ac-accent); color: #fff; cursor: pointer;
                 font-weight: 700;
             }
             #${PANEL_ID} .ac-send:disabled { opacity: .45; cursor: default; }
             #${PANEL_ID} .ac-login {
                 position: absolute; inset: 38px 0 0 0; z-index: 3;
                 display: none; flex-direction: column; padding: 14px;
-                box-sizing: border-box; background: #22262a; color: #ddd;
+                box-sizing: border-box; background: #22262a; color: var(--ac-text);
             }
             #${PANEL_ID} .ac-login.ac-show { display: flex; }
             #${PANEL_ID} .ac-login h3 { margin: 0 0 10px; color: #fff; font-size: 14px; }
@@ -171,7 +218,7 @@
             }
             #${PANEL_ID} .ac-login button {
                 margin-top: 8px; padding: 8px; border: 1px solid #111; border-radius: 3px;
-                background: #405d79; color: #fff; cursor: pointer;
+                background: var(--ac-accent); color: #fff; cursor: pointer;
             }
             #${PANEL_ID} .ac-login-note { margin-top: 10px !important; color: #8f979e; font-size: 10px; }
             #${PANEL_ID} .ac-api-table { width: 100%; border-collapse: collapse; margin: 2px 0 8px; font-size: 10px; }
@@ -186,11 +233,84 @@
                 color: #9fa7ae; font-size: 10px;
             }
             #${PANEL_ID} details.ac-privacy summary {
-                cursor: pointer; color: #9ab3cb; user-select: none;
+                cursor: pointer; color: var(--ac-online); user-select: none;
             }
             #${PANEL_ID} .ac-privacy-body { margin-top: 7px; line-height: 1.4; }
             #${PANEL_ID} .ac-privacy-body p { margin: 0 0 7px; }
             #${PANEL_ID} .ac-privacy-body strong { color: #d6dbe0; }
+
+            #${PANEL_ID}[data-theme="almanac"] {
+                --ac-panel-bg: #071321;
+                --ac-body-bg: #081a2d;
+                --ac-header-top: #0c3150;
+                --ac-header-bottom: #071827;
+                --ac-status-bg: #07121f;
+                --ac-composer-bg: #07111c;
+                --ac-input-bg: #091827;
+                --ac-border: #0a6ea3;
+                --ac-text: #d9f4ff;
+                --ac-message-text: #e6f7ff;
+                --ac-muted: #7fa7b8;
+                --ac-online: #22c9ff;
+                --ac-name: #11c6ff;
+                --ac-faction: #6d9fb2;
+                --ac-time: #6c8794;
+                --ac-accent: #067fb8;
+                --ac-scroll-track: #06111c;
+                --ac-scroll-thumb: #00aee8;
+                --ac-scroll-thumb-hover: #31d4ff;
+            }
+
+            #${PANEL_ID}[data-theme="flux"] {
+                --ac-panel-bg: #100818;
+                --ac-body-bg: #12091d;
+                --ac-header-top: #29103d;
+                --ac-header-bottom: #13091f;
+                --ac-status-bg: #110719;
+                --ac-composer-bg: #0e0715;
+                --ac-input-bg: #170b22;
+                --ac-border: #6f2296;
+                --ac-text: #f1e5ff;
+                --ac-message-text: #f5efff;
+                --ac-muted: #aa8cb7;
+                --ac-online: #28e4f1;
+                --ac-name: #30e2ef;
+                --ac-faction: #c24ae6;
+                --ac-time: #8d7b98;
+                --ac-accent: #70269c;
+                --ac-scroll-track: #0b0610;
+                --ac-scroll-thumb: #9e2ccc;
+                --ac-scroll-thumb-hover: #d53eff;
+            }
+
+            #${PANEL_ID} .ac-settings {
+                position: absolute;
+                top: 42px;
+                right: 8px;
+                z-index: 5;
+                display: none;
+                width: 180px;
+                padding: 10px;
+                box-sizing: border-box;
+                border: 1px solid var(--ac-border);
+                border-radius: 4px;
+                background: var(--ac-panel-bg);
+                box-shadow: 0 4px 14px rgba(0,0,0,.55);
+                color: var(--ac-text);
+            }
+            #${PANEL_ID} .ac-settings.ac-show { display: block; }
+            #${PANEL_ID} .ac-settings-title { font-weight: 700; margin-bottom: 8px; }
+            #${PANEL_ID} .ac-settings-label { font-size: 10px; color: var(--ac-muted); margin-bottom: 4px; }
+            #${PANEL_ID} .ac-theme-select {
+                width: 100%;
+                padding: 6px;
+                border: 1px solid var(--ac-border);
+                border-radius: 3px;
+                background: var(--ac-input-bg);
+                color: var(--ac-text);
+                outline: none;
+            }
+
             #${LAUNCHER_ID} {
                 width: 40px; height: 40px; border: 1px solid #111; border-radius: 4px;
                 background: linear-gradient(#405d79, #27394b); color: white; cursor: pointer;
@@ -241,6 +361,30 @@
             width: Number.isFinite(saved.width) ? saved.width : null,
             height: Number.isFinite(saved.height) ? saved.height : null
         };
+    }
+
+    function themeImageValue(url) {
+        if (!url) return 'none';
+        const escaped = String(url).replace(/["\\]/g, '\\$&');
+        return `url("${escaped}")`;
+    }
+
+    function applyTheme(theme, persist = true) {
+        const nextTheme = THEMES.has(theme) ? theme : 'default';
+        state.theme = nextTheme;
+
+        if (ui.panel) {
+            ui.panel.dataset.theme = nextTheme;
+            const assets = THEME_ASSETS[nextTheme] || {};
+            ui.panel.style.setProperty('--ac-theme-header-image', themeImageValue(assets.header));
+            ui.panel.style.setProperty('--ac-theme-bg-image', themeImageValue(assets.background));
+        }
+
+        if (ui.themeSelect && ui.themeSelect.value !== nextTheme) {
+            ui.themeSelect.value = nextTheme;
+        }
+
+        if (persist) GM_setValue(THEME_KEY, nextTheme);
     }
 
     function saveUiState(partial = {}) {
@@ -309,14 +453,36 @@
         const header = el('div', 'ac-header');
         const title = el('div', 'ac-title', state.roomName);
         const online = el('div', 'ac-online', 'offline');
+        const settingsButton = el('button', '', '⚙');
+        settingsButton.type = 'button'; settingsButton.title = 'Settings';
         const min = el('button', '', '—');
-        min.type = 'button'; min.title = 'Minimize';
+        min.type = 'button'; min.title = 'Hide';
         const close = el('button', '', '×');
         close.type = 'button'; close.title = 'Close';
-        header.append(title, online, min, close);
+        header.append(title, online, settingsButton, min, close);
 
         const status = el('div', 'ac-status', 'Not connected');
         const body = el('div', 'ac-body');
+
+        const settings = el('div', 'ac-settings');
+        const settingsTitle = el('div', 'ac-settings-title', 'Chat settings');
+        const themeLabel = el('div', 'ac-settings-label', 'Theme');
+        const themeSelect = document.createElement('select');
+        themeSelect.className = 'ac-theme-select';
+
+        for (const [value, label] of [
+            ['default', 'Default'],
+            ['almanac', 'Almanac'],
+            ['flux', 'FLUX']
+        ]) {
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = label;
+            themeSelect.appendChild(option);
+        }
+
+        themeSelect.value = state.theme;
+        settings.append(settingsTitle, themeLabel, themeSelect);
 
         const composer = el('div', 'ac-composer');
         const textarea = document.createElement('textarea');
@@ -392,9 +558,11 @@
 
         login.append(loginTitle, loginInfo, actions, shortNote, privacy, loginError);
 
-        panel.append(header, status, body, composer, login);
+        panel.append(header, status, body, composer, login, settings);
         document.body.appendChild(panel);
-        ui = { panel, header, title, online, min, close, status, body, textarea, send, login, input, loginButton, loginError };
+        ui = { panel, header, title, online, settingsButton, min, close, status, body, textarea, send, login, input, loginButton, loginError, settings, themeSelect };
+
+        applyTheme(state.theme, false);
 
         const savedUi = loadUiState();
 
@@ -418,9 +586,19 @@
         if (savedUi.minimized) panel.classList.add('ac-minimized');
         if (savedUi.visible) panel.classList.add('ac-visible');
 
+        settingsButton.addEventListener('click', (e) => {
+            e.stopPropagation();
+            settings.classList.toggle('ac-show');
+        });
+
+        themeSelect.addEventListener('change', () => {
+            applyTheme(themeSelect.value, true);
+        });
+
         min.addEventListener('click', (e) => {
             e.stopPropagation();
             panel.classList.remove('ac-visible');
+            settings.classList.remove('ac-show');
             panel.classList.remove('ac-minimized');
             saveUiState({ visible: false, minimized: false });
             schedulePoll(POLL_CLOSED_MS);
@@ -428,6 +606,7 @@
         close.addEventListener('click', (e) => {
             e.stopPropagation();
             panel.classList.remove('ac-visible');
+            settings.classList.remove('ac-show');
             saveUiState({ visible: false });
             schedulePoll(POLL_CLOSED_MS);
         });
@@ -533,7 +712,7 @@
         button.style.pointerEvents = 'auto';
         button.style.touchAction = 'manipulation';
 
-        button.append(document.createTextNode('ALLY'));
+        button.append(document.createTextNode('FLUX'));
 
         const badge = el('span', 'ac-badge', '0');
         button.appendChild(badge);
@@ -557,6 +736,7 @@
 
             if (isVisible) {
                 ui.panel.classList.remove('ac-visible');
+                ui.settings?.classList.remove('ac-show');
                 saveUiState({ visible: false });
                 schedulePoll(POLL_CLOSED_MS);
                 return;
@@ -1099,6 +1279,11 @@
         GM_addValueChangeListener(UI_STATE_KEY, (_name, _oldValue, newValue, remote) => {
             if (!remote) return;
             applySyncedUiState(newValue);
+        });
+
+        GM_addValueChangeListener(THEME_KEY, (_name, _oldValue, newValue, remote) => {
+            if (!remote) return;
+            applyTheme(newValue, false);
         });
     }
 
