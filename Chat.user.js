@@ -3,7 +3,7 @@
 // @namespace    almanac.shared.chat
 // @updateURL   https://github.com/Dannebox/Shared-chat/raw/refs/heads/main/Chat.user.js
 // @downloadURL https://github.com/Dannebox/Shared-chat/raw/refs/heads/main/Chat.user.js
-// @version      0.3.7
+// @version      0.1.37
 // @description  Secure shared chat for approved Torn factions using CSP-safe HTTP polling; does not scrape Torn pages.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -784,7 +784,7 @@
         }
 
         ui.send.disabled = false;
-        ui.online.textContent = 'polling';
+        ui.online.textContent = 'Connected';
         setStatus(`${state.me.name} · ${state.me.faction_name || state.factionNames[String(state.me.faction_id)] || `Faction ${state.me.faction_id}`}`);
     }
 
