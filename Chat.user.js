@@ -3,7 +3,7 @@
 // @namespace    almanac.shared.chat
 // @updateURL   https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
 // @downloadURL https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
-// @version      0.1.45
+// @version      0.1.48
 // @description  Secure shared chat for approved Torn factions using CSP-safe HTTP polling; does not scrape Torn pages.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -491,14 +491,21 @@
     function saveCurrentPanelGeometry() {
         if (!ui.panel || isMobileLayout()) return;
 
-        const rect = ui.panel.getBoundingClientRect();
+        const panel = ui.panel;
+        if (!panel.classList.contains('ac-visible')) return;
+        if (panel.classList.contains('ac-minimized')) return;
+
+        const rect = panel.getBoundingClientRect();
+
+        // Never let display:none / transitional zero-sized observations overwrite
+        // the last real desktop geometry.
+        if (rect.width < 260 || rect.height < 220) return;
 
         saveUiState({
             left: Math.round(rect.left),
             top: Math.round(rect.top),
             width: Math.round(rect.width),
-            height: Math.round(rect.height),
-            visible: ui.panel.classList.contains('ac-visible')
+            height: Math.round(rect.height)
         });
     }
 
@@ -571,7 +578,7 @@
     function currentUserscriptVersion() {
         return String(
             globalThis.GM_info?.script?.version ||
-            '0.1.47'
+            '0.1.48'
         );
     }
 
@@ -855,6 +862,7 @@
 
         min.addEventListener('click', (e) => {
             e.stopPropagation();
+            saveCurrentPanelGeometry();
             panel.classList.remove('ac-visible');
             settings.classList.remove('ac-show');
             panel.classList.remove('ac-minimized');
@@ -863,6 +871,7 @@
         });
         close.addEventListener('click', (e) => {
             e.stopPropagation();
+            saveCurrentPanelGeometry();
             panel.classList.remove('ac-visible');
             settings.classList.remove('ac-show');
             saveUiState({ visible: false });
@@ -889,13 +898,20 @@
         let resizeSaveTimer = null;
         const resizeObserver = new ResizeObserver(() => {
             if (isMobileLayout()) return;
+            if (!panel.classList.contains('ac-visible')) return;
             if (panel.classList.contains('ac-minimized')) return;
             if (panel.dataset.syncingUi === '1') return;
 
             clearTimeout(resizeSaveTimer);
             resizeSaveTimer = setTimeout(() => {
+                if (!panel.classList.contains('ac-visible')) return;
+
                 const rect = panel.getBoundingClientRect();
+                if (rect.width < 260 || rect.height < 220) return;
+
                 saveUiState({
+                    left: Math.round(rect.left),
+                    top: Math.round(rect.top),
                     width: Math.round(rect.width),
                     height: Math.round(rect.height)
                 });
@@ -995,6 +1011,7 @@
             const isVisible = ui.panel.classList.contains('ac-visible');
 
             if (isVisible) {
+                saveCurrentPanelGeometry();
                 ui.panel.classList.remove('ac-visible');
                 ui.settings?.classList.remove('ac-show');
                 saveUiState({ visible: false });
@@ -1028,9 +1045,24 @@
         if (tornWindow) {
             const r = tornWindow.getBoundingClientRect();
             const left = Math.max(8, r.left - 308);
+            const bottom = Math.max(0, window.innerHeight - r.bottom);
+
             ui.panel.style.left = `${left}px`;
             ui.panel.style.right = 'auto';
-            ui.panel.style.bottom = `${Math.max(0, window.innerHeight - r.bottom)}px`;
+            ui.panel.style.bottom = `${bottom}px`;
+
+            // Convert the auto-placement into a stable top/left geometry and save it,
+            // so reopening the browser does not treat it as a fresh default position.
+            requestAnimationFrame(() => {
+                if (!ui.panel?.classList.contains('ac-visible') || isMobileLayout()) return;
+                const rect = ui.panel.getBoundingClientRect();
+                ui.panel.style.left = `${Math.round(rect.left)}px`;
+                ui.panel.style.top = `${Math.round(rect.top)}px`;
+                ui.panel.style.right = 'auto';
+                ui.panel.style.bottom = 'auto';
+                ui.panel.dataset.dragged = '1';
+                saveCurrentPanelGeometry();
+            });
         }
     }
 
