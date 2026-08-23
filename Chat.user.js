@@ -3,7 +3,7 @@
 // @namespace    almanac.shared.chat
 // @updateURL   https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
 // @downloadURL https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
-// @version      0.1.48
+// @version      0.1.45
 // @description  Secure shared chat for approved Torn factions using CSP-safe HTTP polling; does not scrape Torn pages.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -33,9 +33,9 @@
     const POLL_CLOSED_MS = 10000;
     const MOBILE_MEDIA = '(max-width: 700px)';
     const UPDATE_URL = 'https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js';
-    const UPDATE_CHECK_KEY = 'alliance_chat_update_check_v1';
+    const UPDATE_CHECK_KEY = 'alliance_chat_update_check_v2';
     const UPDATE_AVAILABLE_KEY = 'alliance_chat_update_available_v1';
-    const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+    const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 
     const THEME_ASSETS = {
         almanac: {
@@ -569,7 +569,10 @@
     }
 
     function currentUserscriptVersion() {
-        return '0.1.46';
+        return String(
+            globalThis.GM_info?.script?.version ||
+            '0.1.47'
+        );
     }
 
     function compareVersions(a, b) {
@@ -1009,6 +1012,7 @@
             updateBadge();
 
             positionPanelNearTornChat();
+            checkForUserscriptUpdate();
             startIfNeeded();
         });
 
@@ -1708,16 +1712,23 @@
             if (!remote) return;
             applyTheme(newValue, false);
         });
+
+        GM_addValueChangeListener(UPDATE_AVAILABLE_KEY, (_name, _oldValue, newValue, remote) => {
+            if (!remote) return;
+            state.updateAvailable = String(newValue || '');
+            renderConnectionState();
+        });
     }
 
     function boot() {
-        checkForUserscriptUpdate();
-
         preloadThemeAssets();
 
         addStyles();
         buildPanel();
         installLauncher();
+
+        // Run after buildPanel so a discovered update can be rendered immediately.
+        checkForUserscriptUpdate();
 
         if (loadUiState().visible) {
             startIfNeeded();
