@@ -3,7 +3,7 @@
 // @namespace    almanac.shared.chat
 // @updateURL   https://github.com/Dannebox/Shared-chat/raw/refs/heads/main/Chat.user.js
 // @downloadURL https://github.com/Dannebox/Shared-chat/raw/refs/heads/main/Chat.user.js
-// @version      0.1.39
+// @version      0.1.44
 // @description  Secure shared chat for approved Torn factions using CSP-safe HTTP polling; does not scrape Torn pages.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -23,12 +23,14 @@
     // CHANGE THIS to your HTTPS hostname. Do not put any secrets in this file.
     const API_BASE = 'https://chat.shiroshura.com';
     const TOKEN_KEY = 'alliance_chat_session_v1';
+    const REFRESH_TOKEN_KEY = 'alliance_chat_refresh_v1';
     const UI_STATE_KEY = 'alliance_chat_ui_state_v1';
     const THEME_KEY = 'alliance_chat_theme_v1';
     const PANEL_ID = 'almanac-alliance-chat';
     const LAUNCHER_ID = 'almanac-alliance-chat-launcher';
     const POLL_OPEN_MS = 3000;
     const POLL_CLOSED_MS = 10000;
+    const MOBILE_MEDIA = '(max-width: 700px)';
 
     const THEME_ASSETS = {
         almanac: { header: 'https://i.imgur.com/DPf5q8q.png', background: 'https://i.imgur.com/B2V4Z4m.png' },
@@ -39,6 +41,8 @@
 
     const state = {
         token: GM_getValue(TOKEN_KEY, ''),
+        refreshToken: GM_getValue(REFRESH_TOKEN_KEY, ''),
+        refreshInFlight: null,
         roomId: null,
         roomName: 'Flux Family',
         keyVersion: null,
@@ -56,6 +60,11 @@
     };
 
     let ui = {};
+
+    // Transient mobile-only viewport state. This is intentionally not persisted:
+    // it only prevents keyboard open/close from slightly changing the compact size.
+    let mobileCompactHeight = null;
+    let mobileKeyboardWasOpen = false;
 
     function addStyles() {
         if (document.getElementById('almanac-alliance-chat-css')) return;
@@ -86,6 +95,7 @@
                 --ac-theme-bg-image: none;
 
                 position: fixed;
+                box-sizing: border-box;
                 width: 300px;
                 height: 540px;
                 min-width: 260px;
@@ -311,6 +321,59 @@
                 outline: none;
             }
 
+            #${PANEL_ID} .ac-mobile-size { display: none; }
+
+            @media (max-width: 700px) {
+                #${PANEL_ID} {
+                    width: calc(100vw - 12px) !important;
+                    height: min(65dvh, 520px);
+                    min-width: 0;
+                    min-height: 240px;
+                    max-width: none;
+                    max-height: calc(100dvh - 12px);
+                    left: 6px !important;
+                    right: auto !important;
+                    top: auto;
+                    bottom: 6px;
+                    resize: none;
+                    border-radius: 8px;
+                }
+                #${PANEL_ID}.ac-mobile-expanded { height: calc(100dvh - 12px); }
+                #${PANEL_ID} .ac-header {
+                    height: 44px; min-height: 44px; cursor: default;
+                    padding: 0 6px 0 9px; gap: 4px;
+                }
+                #${PANEL_ID} .ac-header button {
+                    width: 32px; height: 32px; font-size: 18px; line-height: 28px;
+                    touch-action: manipulation;
+                }
+                #${PANEL_ID} .ac-mobile-size { display: inline-block; }
+                #${PANEL_ID} .ac-status { min-height: 24px; padding: 5px 8px; }
+                #${PANEL_ID} .ac-body {
+                    -webkit-overflow-scrolling: touch;
+                    overscroll-behavior: contain;
+                }
+                #${PANEL_ID} .ac-composer {
+                    padding: 8px; gap: 7px;
+                    padding-bottom: max(8px, env(safe-area-inset-bottom));
+                }
+                #${PANEL_ID} .ac-composer textarea {
+                    min-height: 42px; max-height: 84px; padding: 9px;
+                    font-size: 16px; line-height: 1.25;
+                }
+                #${PANEL_ID} .ac-send {
+                    width: 64px; min-width: 64px; height: 42px; font-size: 13px;
+                    touch-action: manipulation;
+                }
+                #${PANEL_ID} .ac-settings {
+                    top: 48px; right: 6px; width: min(220px, calc(100vw - 24px));
+                }
+                #${PANEL_ID} .ac-login {
+                    inset: 44px 0 0 0; overflow-y: auto;
+                    padding-bottom: max(14px, env(safe-area-inset-bottom));
+                }
+            }
+
             #${LAUNCHER_ID} {
                 width: 40px; height: 40px; border: 1px solid #111; border-radius: 4px;
                 background: linear-gradient(#405d79, #27394b); color: white; cursor: pointer;
@@ -350,7 +413,8 @@
                 left: null,
                 top: null,
                 width: null,
-                height: null
+                height: null,
+                mobileExpanded: false
             };
         }
         return {
@@ -359,7 +423,8 @@
             left: Number.isFinite(saved.left) ? saved.left : null,
             top: Number.isFinite(saved.top) ? saved.top : null,
             width: Number.isFinite(saved.width) ? saved.width : null,
-            height: Number.isFinite(saved.height) ? saved.height : null
+            height: Number.isFinite(saved.height) ? saved.height : null,
+            mobileExpanded: !!saved.mobileExpanded
         };
     }
 
@@ -391,27 +456,53 @@
         GM_setValue(UI_STATE_KEY, { ...loadUiState(), ...partial });
     }
 
+    function saveCurrentPanelGeometry() {
+        if (!ui.panel || isMobileLayout()) return;
+
+        const rect = ui.panel.getBoundingClientRect();
+
+        saveUiState({
+            left: Math.round(rect.left),
+            top: Math.round(rect.top),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height),
+            visible: ui.panel.classList.contains('ac-visible')
+        });
+    }
+
     function applySyncedUiState(saved) {
         if (!ui.panel || !saved || typeof saved !== 'object') return;
 
         const panel = ui.panel;
         panel.dataset.syncingUi = '1';
 
-        if (Number.isFinite(saved.width)) {
-            panel.style.width = `${Math.max(260, Math.min(saved.width, window.innerWidth - 16))}px`;
-        }
+        if (isMobileLayout()) {
+            panel.classList.toggle('ac-mobile-expanded', !!saved.mobileExpanded);
 
-        if (Number.isFinite(saved.height)) {
-            panel.style.height = `${Math.max(220, Math.min(saved.height, window.innerHeight - 16))}px`;
-        }
+            if (ui.mobileSizeButton) {
+                const expanded = panel.classList.contains('ac-mobile-expanded');
+                ui.mobileSizeButton.textContent = expanded ? '▣' : '⛶';
+                ui.mobileSizeButton.title = expanded ? 'Compact chat' : 'Expand chat';
+            }
 
-        if (Number.isFinite(saved.left) && Number.isFinite(saved.top)) {
-            const pos = clampPanelPosition(panel, saved.left, saved.top);
-            panel.style.left = `${pos.left}px`;
-            panel.style.top = `${pos.top}px`;
-            panel.style.right = 'auto';
-            panel.style.bottom = 'auto';
-            panel.dataset.dragged = '1';
+            updateMobileViewport();
+        } else {
+            if (Number.isFinite(saved.width)) {
+                panel.style.width = `${Math.max(260, Math.min(saved.width, window.innerWidth - 16))}px`;
+            }
+
+            if (Number.isFinite(saved.height)) {
+                panel.style.height = `${Math.max(220, Math.min(saved.height, window.innerHeight - 16))}px`;
+            }
+
+            if (Number.isFinite(saved.left) && Number.isFinite(saved.top)) {
+                const pos = clampPanelPosition(panel, saved.left, saved.top);
+                panel.style.left = `${pos.left}px`;
+                panel.style.top = `${pos.top}px`;
+                panel.style.right = 'auto';
+                panel.style.bottom = 'auto';
+                panel.dataset.dragged = '1';
+            }
         }
 
         panel.classList.remove('ac-minimized');
@@ -455,11 +546,13 @@
         const online = el('div', 'ac-online', 'offline');
         const settingsButton = el('button', '', '⚙');
         settingsButton.type = 'button'; settingsButton.title = 'Settings';
+        const mobileSizeButton = el('button', 'ac-mobile-size', '⛶');
+        mobileSizeButton.type = 'button'; mobileSizeButton.title = 'Expand chat';
         const min = el('button', '', '—');
         min.type = 'button'; min.title = 'Hide';
         const close = el('button', '', '×');
         close.type = 'button'; close.title = 'Close';
-        header.append(title, online, settingsButton, min, close);
+        header.append(title, online, settingsButton, mobileSizeButton, min, close);
 
         const status = el('div', 'ac-status', 'Not connected');
         const body = el('div', 'ac-body');
@@ -519,7 +612,7 @@
         const shortNote = el(
             'p',
             'ac-login-note',
-            'Your key is used once to verify your Torn account and current faction. The API key is not stored.'
+            'Your key is used once to verify your Torn account and current faction. The API key is not stored. This device stays signed in for up to 90 days using a rotating session token.'
         );
 
         const privacy = document.createElement('details');
@@ -560,31 +653,55 @@
 
         panel.append(header, status, body, composer, login, settings);
         document.body.appendChild(panel);
-        ui = { panel, header, title, online, settingsButton, min, close, status, body, textarea, send, login, input, loginButton, loginError, settings, themeSelect };
+        ui = { panel, header, title, online, settingsButton, mobileSizeButton, min, close, status, body, textarea, send, login, input, loginButton, loginError, settings, themeSelect };
 
         applyTheme(state.theme, false);
 
         const savedUi = loadUiState();
 
-        if (savedUi.left !== null && savedUi.top !== null) {
-            const pos = clampPanelPosition(panel, savedUi.left, savedUi.top);
-            panel.style.left = `${pos.left}px`;
-            panel.style.top = `${pos.top}px`;
-            panel.style.right = 'auto';
-            panel.style.bottom = 'auto';
-            panel.dataset.dragged = '1';
-        }
+        if (isMobileLayout()) {
+            panel.classList.toggle('ac-mobile-expanded', savedUi.mobileExpanded);
+            mobileSizeButton.textContent = savedUi.mobileExpanded ? '▣' : '⛶';
+            mobileSizeButton.title = savedUi.mobileExpanded ? 'Compact chat' : 'Expand chat';
+        } else {
+            if (savedUi.left !== null && savedUi.top !== null) {
+                const pos = clampPanelPosition(panel, savedUi.left, savedUi.top);
+                panel.style.left = `${pos.left}px`;
+                panel.style.top = `${pos.top}px`;
+                panel.style.right = 'auto';
+                panel.style.bottom = 'auto';
+                panel.dataset.dragged = '1';
+            }
 
-        if (savedUi.width !== null) {
-            panel.style.width = `${Math.max(260, Math.min(savedUi.width, window.innerWidth - 16))}px`;
-        }
+            if (savedUi.width !== null) {
+                panel.style.width = `${Math.max(260, Math.min(savedUi.width, window.innerWidth - 16))}px`;
+            }
 
-        if (savedUi.height !== null) {
-            panel.style.height = `${Math.max(220, Math.min(savedUi.height, window.innerHeight - 16))}px`;
+            if (savedUi.height !== null) {
+                panel.style.height = `${Math.max(220, Math.min(savedUi.height, window.innerHeight - 16))}px`;
+            }
         }
 
         if (savedUi.minimized) panel.classList.add('ac-minimized');
         if (savedUi.visible) panel.classList.add('ac-visible');
+
+        mobileSizeButton.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (!isMobileLayout()) return;
+            panel.classList.toggle('ac-mobile-expanded');
+            const expanded = panel.classList.contains('ac-mobile-expanded');
+            mobileSizeButton.textContent = expanded ? '▣' : '⛶';
+            mobileSizeButton.title = expanded ? 'Compact chat' : 'Expand chat';
+
+            if (!expanded) {
+                const viewportHeight = window.visualViewport?.height || window.innerHeight;
+                mobileCompactHeight = Math.max(240, Math.min(viewportHeight * 0.65, 520));
+                panel.dataset.mobileHeightInitialized = '1';
+            }
+
+            saveUiState({ mobileExpanded: expanded });
+            updateMobileViewport(true);
+        });
 
         settingsButton.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -630,6 +747,7 @@
 
         let resizeSaveTimer = null;
         const resizeObserver = new ResizeObserver(() => {
+            if (isMobileLayout()) return;
             if (panel.classList.contains('ac-minimized')) return;
             if (panel.dataset.syncingUi === '1') return;
 
@@ -644,6 +762,7 @@
         });
 
         resizeObserver.observe(panel);
+        updateMobileViewport();
     }
 
     function installLauncher() {
@@ -745,6 +864,7 @@
             ui.panel.classList.add('ac-visible');
             ui.panel.classList.remove('ac-minimized');
             saveUiState({ visible: true, minimized: false });
+            if (isMobileLayout()) updateMobileViewport();
             schedulePoll(0);
 
             state.unread = 0;
@@ -772,9 +892,111 @@
         }
     }
 
+    function isMobileLayout() {
+        return window.matchMedia(MOBILE_MEDIA).matches;
+    }
+
+    function updateMobileViewport(force = false) {
+        if (!ui.panel) return;
+
+        const panel = ui.panel;
+
+        if (!isMobileLayout()) {
+            panel.classList.remove('ac-mobile-expanded');
+            mobileCompactHeight = null;
+            mobileKeyboardWasOpen = false;
+
+            const saved = loadUiState();
+
+            if (saved.width !== null) {
+                panel.style.width = `${Math.max(260, Math.min(saved.width, window.innerWidth - 16))}px`;
+            }
+
+            if (saved.height !== null) {
+                panel.style.height = `${Math.max(220, Math.min(saved.height, window.innerHeight - 16))}px`;
+            }
+
+            if (saved.left !== null && saved.top !== null) {
+                const pos = clampPanelPosition(panel, saved.left, saved.top);
+                panel.style.left = `${pos.left}px`;
+                panel.style.top = `${pos.top}px`;
+                panel.style.right = 'auto';
+                panel.style.bottom = 'auto';
+                panel.dataset.dragged = '1';
+            }
+
+            if (ui.mobileSizeButton) {
+                ui.mobileSizeButton.textContent = '⛶';
+                ui.mobileSizeButton.title = 'Expand chat';
+            }
+            return;
+        }
+
+        const viewport = window.visualViewport;
+        const viewportWidth = viewport?.width || window.innerWidth;
+        const viewportHeight = viewport?.height || window.innerHeight;
+        const offsetLeft = viewport?.offsetLeft || 0;
+        const offsetTop = viewport?.offsetTop || 0;
+        const expanded = panel.classList.contains('ac-mobile-expanded');
+
+        const keyboardLikelyOpen =
+            !!viewport && viewportHeight < window.innerHeight * 0.82;
+
+        // Capture compact height only while the keyboard is closed.
+        // Once captured, keep reusing it so browser chrome / visualViewport
+        // changes don't make the chat grow a few pixels after typing.
+        if (!expanded && !keyboardLikelyOpen) {
+            if (mobileCompactHeight === null || mobileKeyboardWasOpen === false && force === false && panel.dataset.mobileHeightInitialized !== '1') {
+                mobileCompactHeight = Math.max(
+                    240,
+                    Math.min(viewportHeight * 0.65, 520)
+                );
+                panel.dataset.mobileHeightInitialized = '1';
+            }
+        }
+
+        let targetHeight;
+
+        if (expanded) {
+            targetHeight = Math.max(240, viewportHeight - 12);
+        } else if (keyboardLikelyOpen) {
+            targetHeight = Math.max(240, viewportHeight - 12);
+        } else {
+            if (mobileCompactHeight === null) {
+                mobileCompactHeight = Math.max(
+                    240,
+                    Math.min(viewportHeight * 0.65, 520)
+                );
+            }
+            targetHeight = mobileCompactHeight;
+        }
+
+        mobileKeyboardWasOpen = keyboardLikelyOpen;
+
+        const targetWidth = Math.max(248, viewportWidth - 12);
+        const left = offsetLeft + 6;
+        const top = offsetTop + Math.max(6, viewportHeight - targetHeight - 6);
+
+        panel.style.width = `${targetWidth}px`;
+        panel.style.height = `${targetHeight}px`;
+        panel.style.left = `${left}px`;
+        panel.style.top = `${top}px`;
+        panel.style.right = 'auto';
+        panel.style.bottom = 'auto';
+
+        if (force && ui.body) {
+            requestAnimationFrame(() => {
+                if (document.activeElement === ui.textarea) {
+                    ui.body.scrollTop = ui.body.scrollHeight;
+                }
+            });
+        }
+    }
+
     function makeDraggable(panel, handle) {
         let dragging = false, dx = 0, dy = 0;
         handle.addEventListener('mousedown', (e) => {
+            if (isMobileLayout()) return;
             if (e.target.closest('button')) return;
             const r = panel.getBoundingClientRect();
             dragging = true; dx = e.clientX - r.left; dy = e.clientY - r.top;
@@ -792,11 +1014,7 @@
             if (!dragging) return;
             dragging = false;
 
-            const r = panel.getBoundingClientRect();
-            saveUiState({
-                left: Math.round(r.left),
-                top: Math.round(r.top)
-            });
+            saveCurrentPanelGeometry();
         });
     }
 
@@ -804,13 +1022,13 @@
         return document.visibilityState === 'visible' && document.hasFocus();
     }
 
-    async function api(path, options = {}) {
+    async function apiRaw(path, options = {}) {
         const headers = {
             'Content-Type': 'application/json',
             ...(options.headers || {})
         };
 
-        if (state.token) {
+        if (state.token && !options.skipAuth) {
             headers.Authorization = `Bearer ${state.token}`;
         }
 
@@ -831,6 +1049,7 @@
                     if (response.status < 200 || response.status >= 300) {
                         const err = new Error(data.detail || `HTTP ${response.status}`);
                         err.status = response.status;
+                        err.data = data;
                         reject(err);
                         return;
                     }
@@ -838,19 +1057,72 @@
                     resolve(data);
                 },
 
-                onerror: () => {
-                    reject(new Error('Network request failed'));
-                },
-
-                onabort: () => {
-                    reject(new Error('Network request aborted'));
-                },
-
-                ontimeout: () => {
-                    reject(new Error('Network request timed out'));
-                }
+                onerror: () => reject(new Error('Network request failed')),
+                onabort: () => reject(new Error('Network request aborted')),
+                ontimeout: () => reject(new Error('Network request timed out'))
             });
         });
+    }
+
+    async function refreshAccessToken() {
+        if (!state.refreshToken) {
+            throw new Error('No refresh session');
+        }
+
+        if (state.refreshInFlight) {
+            return state.refreshInFlight;
+        }
+
+        state.refreshInFlight = (async () => {
+            const result = await apiRaw('/api/session/refresh', {
+                method: 'POST',
+                skipAuth: true,
+                body: JSON.stringify({ refresh_token: state.refreshToken })
+            });
+
+            if (!result.token || !result.refresh_token) {
+                throw new Error('Invalid refresh response');
+            }
+
+            state.token = result.token;
+            state.refreshToken = result.refresh_token;
+
+            GM_setValue(TOKEN_KEY, state.token);
+            GM_setValue(REFRESH_TOKEN_KEY, state.refreshToken);
+
+            if (result.user) state.me = result.user;
+            return result;
+        })();
+
+        try {
+            return await state.refreshInFlight;
+        } finally {
+            state.refreshInFlight = null;
+        }
+    }
+
+    async function api(path, options = {}) {
+        try {
+            return await apiRaw(path, options);
+        } catch (err) {
+            const canRefresh =
+                err.status === 401 &&
+                !options.skipRefresh &&
+                path !== '/api/auth' &&
+                path !== '/api/session/refresh' &&
+                !!state.refreshToken;
+
+            if (!canRefresh) throw err;
+
+            try {
+                await refreshAccessToken();
+            } catch (_) {
+                logoutLocal();
+                throw err;
+            }
+
+            return apiRaw(path, { ...options, skipRefresh: true });
+        }
     }
 
     async function loginWithKey() {
@@ -872,7 +1144,9 @@
             });
             ui.input.value = '';
             state.token = result.token;
+            state.refreshToken = result.refresh_token || '';
             GM_setValue(TOKEN_KEY, state.token);
+            if (state.refreshToken) GM_setValue(REFRESH_TOKEN_KEY, state.refreshToken);
             state.me = result.user;
             ui.login.classList.remove('ac-show');
             await loadBootstrap(true);
@@ -887,6 +1161,14 @@
     }
 
     async function startIfNeeded() {
+        if (!state.token && state.refreshToken) {
+            try {
+                await refreshAccessToken();
+            } catch (_) {
+                logoutLocal();
+            }
+        }
+
         if (!state.token) {
             showLogin();
             return;
@@ -918,11 +1200,14 @@
 
     function logoutLocal() {
         state.token = '';
+        state.refreshToken = '';
+        state.refreshInFlight = null;
         state.cryptoKey = null;
         state.keyVersion = null;
         state.lastCursor = 0;
         state.seenMessageIds.clear();
         GM_deleteValue(TOKEN_KEY);
+        GM_deleteValue(REFRESH_TOKEN_KEY);
 
         if (state.pollTimer) {
             clearTimeout(state.pollTimer);
@@ -1311,6 +1596,10 @@
     observer.observe(document.documentElement, { childList: true, subtree: true });
 
     window.addEventListener('resize', () => {
+        if (isMobileLayout()) {
+            updateMobileViewport();
+            return;
+        }
         if (!ui.panel || ui.panel.dataset.dragged !== '1') return;
 
         const r = ui.panel.getBoundingClientRect();
@@ -1336,6 +1625,38 @@
         });
     });
 
+    if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', () => {
+            if (isMobileLayout()) updateMobileViewport();
+        });
+        window.visualViewport.addEventListener('scroll', () => {
+            if (isMobileLayout()) updateMobileViewport();
+        });
+    }
+
+    const mobileMediaQuery = window.matchMedia(MOBILE_MEDIA);
+    if (typeof mobileMediaQuery.addEventListener === 'function') {
+        mobileMediaQuery.addEventListener('change', () => updateMobileViewport());
+    }
+
+    const adjustForMobileKeyboard = () => {
+        if (!isMobileLayout()) return;
+        requestAnimationFrame(() => updateMobileViewport(true));
+        setTimeout(() => updateMobileViewport(true), 120);
+        setTimeout(() => updateMobileViewport(true), 300);
+    };
+
+    document.addEventListener('focusin', (event) => {
+        if (event.target === ui.textarea || event.target === ui.input) adjustForMobileKeyboard();
+    });
+
+    document.addEventListener('focusout', (event) => {
+        if (event.target === ui.textarea || event.target === ui.input) {
+            setTimeout(() => updateMobileViewport(), 180);
+            setTimeout(() => updateMobileViewport(), 320);
+        }
+    });
+
     const wakePolling = () => {
         if (!state.token || !isPageActive()) return;
 
@@ -1347,10 +1668,17 @@
         schedulePoll(0);
     };
 
-    document.addEventListener('visibilitychange', wakePolling);
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') {
+            saveCurrentPanelGeometry();
+        }
+        wakePolling();
+    });
     window.addEventListener('focus', wakePolling);
 
     window.addEventListener('pagehide', () => {
+        saveCurrentPanelGeometry();
+
         if (state.pollTimer) {
             clearTimeout(state.pollTimer);
             state.pollTimer = null;
