@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         FLUX Shared Chat
 // @namespace    almanac.shared.chat
-// @updateURL   https://github.com/Dannebox/Shared-chat/raw/refs/heads/main/Chat.user.js
-// @downloadURL https://github.com/Dannebox/Shared-chat/raw/refs/heads/main/Chat.user.js
-// @version      0.1.44
+// @updateURL   https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
+// @downloadURL https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
+// @version      0.1.47
 // @description  Secure shared chat for approved Torn factions using CSP-safe HTTP polling; does not scrape Torn pages.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -14,6 +14,7 @@
 // @grant        GM.xmlHttpRequest
 // @connect      127.0.0.1
 // @connect      chat.shiroshura.com
+// @connect      raw.githubusercontent.com
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -31,13 +32,35 @@
     const POLL_OPEN_MS = 3000;
     const POLL_CLOSED_MS = 10000;
     const MOBILE_MEDIA = '(max-width: 700px)';
+    const UPDATE_URL = 'https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js';
+    const UPDATE_CHECK_KEY = 'alliance_chat_update_check_v1';
+    const UPDATE_AVAILABLE_KEY = 'alliance_chat_update_available_v1';
+    const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
     const THEME_ASSETS = {
-        almanac: { header: 'https://i.imgur.com/DPf5q8q.png', background: 'https://i.imgur.com/B2V4Z4m.png' },
-        flux: { header: 'https://i.imgur.com/9MuH7Sf.png', background: 'https://i.imgur.com/KMCLt8U.png' }
+        almanac: {
+            header: 'https://chat.shiroshura.com/assets/almanac/header.webp',
+            background: 'https://chat.shiroshura.com/assets/almanac/background.webp'
+        },
+
+        flux: {
+            header: 'https://chat.shiroshura.com/assets/flux/header.webp',
+            background: 'https://chat.shiroshura.com/assets/flux/background.webp'
+        }
     };
 
     const THEMES = new Set(['default', 'almanac', 'flux']);
+
+    function preloadThemeAssets() {
+        for (const theme of Object.values(THEME_ASSETS)) {
+            for (const url of [theme.header, theme.background]) {
+                if (!url) continue;
+                const img = new Image();
+                img.decoding = 'async';
+                img.src = url;
+            }
+        }
+    }
 
     const state = {
         token: GM_getValue(TOKEN_KEY, ''),
@@ -57,6 +80,7 @@
         seenMessageIds: new Set(),
         factionNames: {},
         theme: THEMES.has(GM_getValue(THEME_KEY, 'default')) ? GM_getValue(THEME_KEY, 'default') : 'default',
+        updateAvailable: GM_getValue(UPDATE_AVAILABLE_KEY, ''),
     };
 
     let ui = {};
@@ -143,6 +167,14 @@
             }
             #${PANEL_ID} .ac-title { font-weight: 700; flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
             #${PANEL_ID} .ac-online { font-size: 10px; color: var(--ac-online); }
+            #${PANEL_ID} .ac-online.ac-update {
+                cursor: pointer;
+                font-weight: 700;
+                text-decoration: underline;
+            }
+            #${PANEL_ID} .ac-online.ac-update:hover {
+                filter: brightness(1.25);
+            }
             #${PANEL_ID} .ac-header button {
                 border: 0; background: transparent; color: var(--ac-text); cursor: pointer;
                 font-size: 16px; width: 24px; height: 24px; line-height: 20px;
@@ -536,6 +568,106 @@
         };
     }
 
+    function currentUserscriptVersion() {
+        return '0.1.46';
+    }
+
+    function compareVersions(a, b) {
+        const pa = String(a || '').split('.').map(part => Number.parseInt(part, 10) || 0);
+        const pb = String(b || '').split('.').map(part => Number.parseInt(part, 10) || 0);
+        const length = Math.max(pa.length, pb.length);
+
+        for (let i = 0; i < length; i++) {
+            const av = pa[i] || 0;
+            const bv = pb[i] || 0;
+            if (av > bv) return 1;
+            if (av < bv) return -1;
+        }
+        return 0;
+    }
+
+    function renderConnectionState(label = 'Connected') {
+        if (!ui.online) return;
+
+        if (state.updateAvailable) {
+            ui.online.textContent = 'Update';
+            ui.online.classList.add('ac-update');
+            ui.online.title = `Version ${state.updateAvailable} available — click to update`;
+            return;
+        }
+
+        ui.online.classList.remove('ac-update');
+        ui.online.removeAttribute('title');
+        ui.online.textContent = label;
+    }
+
+    function openUserscriptUpdate() {
+        window.open(UPDATE_URL, '_blank', 'noopener,noreferrer');
+    }
+
+    async function checkForUserscriptUpdate(force = false) {
+        const now = Date.now();
+        const saved = GM_getValue(UPDATE_CHECK_KEY, null);
+
+        if (
+            !force &&
+            saved &&
+            typeof saved === 'object' &&
+            Number.isFinite(saved.checkedAt) &&
+            now - saved.checkedAt < UPDATE_CHECK_INTERVAL_MS
+        ) {
+            const cachedVersion = String(saved.latestVersion || '');
+            state.updateAvailable =
+                cachedVersion && compareVersions(cachedVersion, currentUserscriptVersion()) > 0
+                    ? cachedVersion
+                    : '';
+            GM_setValue(UPDATE_AVAILABLE_KEY, state.updateAvailable);
+            renderConnectionState();
+            return;
+        }
+
+        try {
+            const source = await new Promise((resolve, reject) => {
+                GM.xmlHttpRequest({
+                    method: 'GET',
+                    url: `${UPDATE_URL}?t=${now}`,
+                    headers: {
+                        'Cache-Control': 'no-cache'
+                    },
+                    responseType: 'text',
+                    onload: response => {
+                        if (response.status >= 200 && response.status < 300) {
+                            resolve(response.responseText || '');
+                        } else {
+                            reject(new Error(`Update check HTTP ${response.status}`));
+                        }
+                    },
+                    onerror: () => reject(new Error('Update check failed')),
+                    onabort: () => reject(new Error('Update check aborted')),
+                    ontimeout: () => reject(new Error('Update check timed out'))
+                });
+            });
+
+            const match = source.match(/^\s*\/\/\s*@version\s+([^\s]+)\s*$/m);
+            const latestVersion = match ? match[1].trim() : '';
+
+            GM_setValue(UPDATE_CHECK_KEY, {
+                checkedAt: now,
+                latestVersion
+            });
+
+            state.updateAvailable =
+                latestVersion && compareVersions(latestVersion, currentUserscriptVersion()) > 0
+                    ? latestVersion
+                    : '';
+
+            GM_setValue(UPDATE_AVAILABLE_KEY, state.updateAvailable);
+            renderConnectionState();
+        } catch (_) {
+            // Update checking should never interfere with chat operation.
+        }
+    }
+
     function buildPanel() {
         if (document.getElementById(PANEL_ID)) return;
         const panel = el('div');
@@ -701,6 +833,12 @@
 
             saveUiState({ mobileExpanded: expanded });
             updateMobileViewport(true);
+        });
+
+        online.addEventListener('click', (e) => {
+            if (!state.updateAvailable) return;
+            e.stopPropagation();
+            openUserscriptUpdate();
         });
 
         settingsButton.addEventListener('click', (e) => {
@@ -1216,7 +1354,7 @@
 
         state.pollInFlight = false;
         ui.send.disabled = true;
-        if (ui.online) ui.online.textContent = 'offline';
+        if (ui.online) renderConnectionState('offline');
     }
 
     async function loadBootstrap(renderHistory) {
@@ -1249,7 +1387,7 @@
         }
 
         ui.send.disabled = false;
-        ui.online.textContent = 'Connected';
+        renderConnectionState('Connecting');
         setStatus(`${state.me.name} · ${state.me.faction_name || state.factionNames[String(state.me.faction_id)] || `Faction ${state.me.faction_id}`}`);
     }
 
@@ -1351,7 +1489,7 @@
             }
 
             state.pollFailures = 0;
-            ui.online.textContent = 'polling';
+            renderConnectionState('Connected');
             setStatus(`${state.me.name} · ${state.me.faction_name || state.factionNames[String(state.me.faction_id)] || `Faction ${state.me.faction_id}`}`);
         } catch (err) {
             if (err.status === 401 || err.status === 403) {
@@ -1366,7 +1504,7 @@
 
             state.pollFailures++;
             if (state.pollFailures >= 3) {
-                ui.online.textContent = 'offline';
+                renderConnectionState('offline');
                 setStatus(`Chat reconnecting: ${err.message}`, true);
             }
         } finally {
@@ -1573,6 +1711,10 @@
     }
 
     function boot() {
+        checkForUserscriptUpdate();
+
+        preloadThemeAssets();
+
         addStyles();
         buildPanel();
         installLauncher();
@@ -1674,7 +1816,10 @@
         }
         wakePolling();
     });
-    window.addEventListener('focus', wakePolling);
+    window.addEventListener('focus', () => {
+        wakePolling();
+        checkForUserscriptUpdate();
+    });
 
     window.addEventListener('pagehide', () => {
         saveCurrentPanelGeometry();
