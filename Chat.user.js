@@ -3,7 +3,7 @@
 // @namespace    almanac.shared.chat
 // @updateURL   https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
 // @downloadURL https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
-// @version      0.1.48
+// @version      0.1.50
 // @description  Secure shared chat for approved Torn factions using CSP-safe HTTP polling; does not scrape Torn pages.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -36,6 +36,8 @@
     const UPDATE_CHECK_KEY = 'alliance_chat_update_check_v2';
     const UPDATE_AVAILABLE_KEY = 'alliance_chat_update_available_v1';
     const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+    const HISTORY_PAGE_SIZE = 20;
+    const HISTORY_MAX_LOADED = 100;
 
     const THEME_ASSETS = {
         almanac: {
@@ -76,11 +78,17 @@
         pollTimer: null,
         pollInFlight: false,
         pollFailures: 0,
+        bootstrapInFlight: null,
+        initialized: false,
         lastCursor: 0,
         seenMessageIds: new Set(),
         factionNames: {},
         theme: THEMES.has(GM_getValue(THEME_KEY, 'default')) ? GM_getValue(THEME_KEY, 'default') : 'default',
         updateAvailable: GM_getValue(UPDATE_AVAILABLE_KEY, ''),
+        historyLoaded: 0,
+        oldestHistorySeq: 0,
+        historyLoading: false,
+        historyExhausted: false,
     };
 
     let ui = {};
@@ -578,7 +586,7 @@
     function currentUserscriptVersion() {
         return String(
             globalThis.GM_info?.script?.version ||
-            '0.1.48'
+            '0.1.50'
         );
     }
 
@@ -884,6 +892,12 @@
                 sendMessage();
             }
         });
+
+        body.addEventListener('scroll', () => {
+            if (body.scrollTop <= 12) {
+                loadOlderHistory();
+            }
+        }, { passive: true });
         loginButton.addEventListener('click', loginWithKey);
         input.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') loginWithKey();
@@ -1023,7 +1037,6 @@
             ui.panel.classList.remove('ac-minimized');
             saveUiState({ visible: true, minimized: false });
             if (isMobileLayout()) updateMobileViewport();
-            schedulePoll(0);
 
             state.unread = 0;
             updateBadge();
@@ -1323,7 +1336,9 @@
             if (state.refreshToken) GM_setValue(REFRESH_TOKEN_KEY, state.refreshToken);
             state.me = result.user;
             ui.login.classList.remove('ac-show');
+            state.initialized = false;
             await loadBootstrap(true);
+            state.initialized = true;
             startPolling();
         } catch (err) {
             ui.input.value = '';
@@ -1335,32 +1350,55 @@
     }
 
     async function startIfNeeded() {
-        if (!state.token && state.refreshToken) {
-            try {
-                await refreshAccessToken();
-            } catch (_) {
-                logoutLocal();
-            }
+        if (state.bootstrapInFlight) {
+            return state.bootstrapInFlight;
         }
 
-        if (!state.token) {
-            showLogin();
-            return;
-        }
+        state.bootstrapInFlight = (async () => {
+            if (!state.token && state.refreshToken) {
+                try {
+                    await refreshAccessToken();
+                } catch (_) {
+                    logoutLocal();
+                }
+            }
+
+            if (!state.token) {
+                showLogin();
+                return;
+            }
+
+            try {
+                // Do not allow polling to use cursor=0 while bootstrap is still loading.
+                state.initialized = false;
+
+                if (state.pollTimer) {
+                    clearTimeout(state.pollTimer);
+                    state.pollTimer = null;
+                }
+
+                await loadBootstrap(true);
+                state.initialized = true;
+                startPolling();
+            } catch (err) {
+                state.initialized = false;
+
+                if (err.status === 401 || err.status === 403) {
+                    logoutLocal();
+                    showLogin(err.status === 403
+                        ? 'Your faction is not authorized.'
+                        : 'Session expired. Verify again.');
+                } else {
+                    setStatus(`Connection error: ${err.message}`, true);
+                    setTimeout(() => startIfNeeded(), 5000);
+                }
+            }
+        })();
 
         try {
-            await loadBootstrap(true);
-            startPolling();
-        } catch (err) {
-            if (err.status === 401 || err.status === 403) {
-                logoutLocal();
-                showLogin(err.status === 403
-                    ? 'Your faction is not authorized.'
-                    : 'Session expired. Verify again.');
-            } else {
-                setStatus(`Connection error: ${err.message}`, true);
-                schedulePoll(5000);
-            }
+            return await state.bootstrapInFlight;
+        } finally {
+            state.bootstrapInFlight = null;
         }
     }
 
@@ -1376,9 +1414,15 @@
         state.token = '';
         state.refreshToken = '';
         state.refreshInFlight = null;
+        state.bootstrapInFlight = null;
+        state.initialized = false;
         state.cryptoKey = null;
         state.keyVersion = null;
         state.lastCursor = 0;
+        state.historyLoaded = 0;
+        state.oldestHistorySeq = 0;
+        state.historyLoading = false;
+        state.historyExhausted = false;
         state.seenMessageIds.clear();
         GM_deleteValue(TOKEN_KEY);
         GM_deleteValue(REFRESH_TOKEN_KEY);
@@ -1415,7 +1459,16 @@
             ui.body.textContent = '';
             state.seenMessageIds.clear();
 
-            for (const msg of data.history || []) {
+            const initialHistory = data.history || [];
+            state.historyLoaded = initialHistory.length;
+            state.oldestHistorySeq = initialHistory.length
+                ? Number(initialHistory[0].seq || 0)
+                : 0;
+            state.historyExhausted =
+                initialHistory.length < HISTORY_PAGE_SIZE ||
+                state.historyLoaded >= HISTORY_MAX_LOADED;
+
+            for (const msg of initialHistory) {
                 rememberMessage(msg);
                 await renderEncryptedMessage(msg);
             }
@@ -1437,7 +1490,7 @@
     }
 
     function schedulePoll(delay = pollDelay()) {
-        if (!state.token) return;
+        if (!state.token || !state.initialized) return;
 
         if (state.pollTimer) {
             clearTimeout(state.pollTimer);
@@ -1452,7 +1505,7 @@
     }
 
     function startPolling() {
-        if (!state.token) return;
+        if (!state.token || !state.initialized) return;
         schedulePoll(0);
     }
 
@@ -1468,8 +1521,85 @@
         return true;
     }
 
+    async function loadOlderHistory() {
+        if (!state.token || !state.cryptoKey) return;
+        if (state.historyLoading || state.historyExhausted) return;
+        if (state.historyLoaded >= HISTORY_MAX_LOADED) {
+            state.historyExhausted = true;
+            return;
+        }
+        if (!state.oldestHistorySeq) {
+            state.historyExhausted = true;
+            return;
+        }
+
+        state.historyLoading = true;
+
+        try {
+            const remaining = HISTORY_MAX_LOADED - state.historyLoaded;
+            const limit = Math.min(HISTORY_PAGE_SIZE, remaining);
+            const before = state.oldestHistorySeq;
+
+            const oldScrollHeight = ui.body.scrollHeight;
+            const oldScrollTop = ui.body.scrollTop;
+
+            const data = await api(
+                `/api/messages/history?before=${encodeURIComponent(before)}&limit=${encodeURIComponent(limit)}`
+            );
+
+            if (Number(data.key_version) !== Number(state.keyVersion)) {
+                await loadBootstrap(true);
+                return;
+            }
+
+            state.factionNames = {
+                ...state.factionNames,
+                ...(data.faction_names || {})
+            };
+
+            const messages = data.messages || [];
+            if (!messages.length) {
+                state.historyExhausted = true;
+                return;
+            }
+
+            // renderEncryptedMessage prepends one node at a time. Walk newest-to-oldest
+            // so the final DOM order remains chronological.
+            for (const msg of [...messages].reverse()) {
+                if (!rememberMessage(msg)) continue;
+                await renderEncryptedMessage(msg, true);
+            }
+
+            state.historyLoaded += messages.length;
+            state.oldestHistorySeq = Number(messages[0]?.seq || state.oldestHistorySeq);
+
+            if (
+                messages.length < limit ||
+                state.historyLoaded >= HISTORY_MAX_LOADED ||
+                data.has_more === false
+            ) {
+                state.historyExhausted = true;
+            }
+
+            // Keep the same message under the user's eyes after prepending history.
+            const addedHeight = ui.body.scrollHeight - oldScrollHeight;
+            ui.body.scrollTop = oldScrollTop + addedHeight;
+        } catch (err) {
+            if (err.status === 401 || err.status === 403) {
+                logoutLocal();
+                showLogin(
+                    err.status === 403
+                        ? 'Faction access was revoked.'
+                        : 'Session expired. Verify again.'
+                );
+            }
+        } finally {
+            state.historyLoading = false;
+        }
+    }
+
     async function pollOnce(force = false) {
-        if (!state.token || state.pollInFlight) return;
+        if (!state.token || !state.initialized || state.pollInFlight) return;
         if (!force && !isPageActive()) return;
 
         state.pollInFlight = true;
@@ -1639,7 +1769,7 @@
         return new TextDecoder().decode(plain);
     }
 
-    async function renderEncryptedMessage(msg) {
+    async function renderEncryptedMessage(msg, prepend = false) {
         let text;
         try { text = await decryptMessage(msg); }
         catch (_) { text = '[Unable to decrypt this message]'; }
@@ -1683,8 +1813,13 @@
         const body = el('div', 'ac-text', text); // textContent: no message HTML execution.
         meta.append(name, faction, stamp);
         wrap.append(meta, body);
-        ui.body.appendChild(wrap);
-        scrollBottom();
+
+        if (prepend) {
+            ui.body.insertBefore(wrap, ui.body.firstChild);
+        } else {
+            ui.body.appendChild(wrap);
+            scrollBottom();
+        }
     }
 
     function addSystem(text, isError = false) {
