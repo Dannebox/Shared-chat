@@ -174,7 +174,12 @@
                 box-sizing: border-box;
             }
             #${PANEL_ID} .ac-title { font-weight: 700; flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-            #${PANEL_ID} .ac-online { font-size: 10px; color: var(--ac-online); }
+            #${PANEL_ID} .ac-online {
+                font-size: 10px;
+                color: var(--ac-online);
+                flex: 0 0 auto;
+                white-space: nowrap;
+            }
             #${PANEL_ID} .ac-online.ac-update {
                 cursor: pointer;
                 font-weight: 700;
@@ -387,6 +392,33 @@
                     width: 32px; height: 32px; font-size: 18px; line-height: 28px;
                     touch-action: manipulation;
                 }
+
+                #${PANEL_ID} .ac-online {
+                    font-size: 9px;
+                    max-width: 58px;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                }
+
+                #${PANEL_ID} .ac-online.ac-update {
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: center;
+                    min-width: 52px;
+                    max-width: none;
+                    height: 26px;
+                    padding: 0 7px;
+                    box-sizing: border-box;
+                    border: 1px solid var(--ac-online);
+                    border-radius: 4px;
+                    background: rgba(0,0,0,.28);
+                    color: var(--ac-online);
+                    text-decoration: none;
+                    font-size: 10px;
+                    line-height: 1;
+                    touch-action: manipulation;
+                }
+
                 #${PANEL_ID} .ac-mobile-size { display: inline-block; }
                 #${PANEL_ID} .ac-status { min-height: 24px; padding: 5px 8px; }
                 #${PANEL_ID} .ac-body {
@@ -586,7 +618,7 @@
     function currentUserscriptVersion() {
         return String(
             globalThis.GM_info?.script?.version ||
-            '0.1.50'
+            '0.1.51'
         );
     }
 
@@ -853,11 +885,21 @@
             updateMobileViewport(true);
         });
 
-        online.addEventListener('click', (e) => {
+        let updateOpenAt = 0;
+        const triggerUpdateOpen = (e) => {
             if (!state.updateAvailable) return;
+            e.preventDefault();
             e.stopPropagation();
+
+            const now = Date.now();
+            if (now - updateOpenAt < 700) return;
+            updateOpenAt = now;
+
             openUserscriptUpdate();
-        });
+        };
+
+        online.addEventListener('click', triggerUpdateOpen);
+        online.addEventListener('pointerup', triggerUpdateOpen);
 
         settingsButton.addEventListener('click', (e) => {
             e.stopPropagation();
