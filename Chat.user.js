@@ -3,7 +3,7 @@
 // @namespace    almanac.shared.chat
 // @updateURL   https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
 // @downloadURL https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
-// @version      0.1.50
+// @version      0.1.56
 // @description  Secure shared chat for approved Torn factions using CSP-safe HTTP polling; does not scrape Torn pages.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -26,6 +26,7 @@
     const TOKEN_KEY = 'alliance_chat_session_v1';
     const REFRESH_TOKEN_KEY = 'alliance_chat_refresh_v1';
     const UI_STATE_KEY = 'alliance_chat_ui_state_v1';
+    const DESKTOP_GEOMETRY_KEY = 'alliance_chat_desktop_geometry_v1';
     const THEME_KEY = 'alliance_chat_theme_v1';
     const PANEL_ID = 'almanac-alliance-chat';
     const LAUNCHER_ID = 'almanac-alliance-chat-launcher';
@@ -53,6 +54,56 @@
 
     const THEMES = new Set(['default', 'almanac', 'flux']);
 
+    const EMOJI_SHORTCODES = {
+        smile: '😄',
+        grin: '😁',
+        joy: '😂',
+        laugh: '🤣',
+        wink: '😉',
+        blush: '😊',
+        heart_eyes: '😍',
+        thinking: '🤔',
+        neutral: '😐',
+        sad: '😢',
+        cry: '😭',
+        angry: '😠',
+        rage: '😡',
+        skull: '💀',
+        clown: '🤡',
+        sunglasses: '😎',
+        party: '🥳',
+        fire: '🔥',
+        heart: '❤️',
+        blue_heart: '💙',
+        purple_heart: '💜',
+        green_heart: '💚',
+        broken_heart: '💔',
+        thumbsup: '👍',
+        thumbsdown: '👎',
+        clap: '👏',
+        pray: '🙏',
+        muscle: '💪',
+        ok_hand: '👌',
+        eyes: '👀',
+        wave: '👋',
+        point_up: '☝️',
+        check: '✅',
+        cross: '❌',
+        warning: '⚠️',
+        star: '⭐',
+        sparkles: '✨',
+        rocket: '🚀',
+        boom: '💥',
+        hundred: '💯'
+    };
+
+    const EMOJI_PICKER_ITEMS = [
+        '😄','😁','😂','🤣','😉','😊','😍','🤔','😐','😢',
+        '😭','😠','😡','💀','🤡','😎','🥳','🔥','❤️','💙',
+        '💜','💚','💔','👍','👎','👏','🙏','💪','👌','👀',
+        '👋','☝️','✅','❌','⚠️','⭐','✨','🚀','💥','💯'
+    ];
+
     function preloadThemeAssets() {
         for (const theme of Object.values(THEME_ASSETS)) {
             for (const url of [theme.header, theme.background]) {
@@ -75,6 +126,10 @@
         me: null,
         maxMessageChars: 1000,
         unread: 0,
+        mentionUnread: 0,
+        mentionDirectory: { users: [], factions: [] },
+        mentionSuggestions: [],
+        mentionSelection: 0,
         pollTimer: null,
         pollInFlight: false,
         pollFailures: 0,
@@ -235,6 +290,94 @@
             #${PANEL_ID} .ac-time { color: var(--ac-time); font-size: 9px; }
             #${PANEL_ID} .ac-faction { color: var(--ac-faction); font-size: 9px; }
             #${PANEL_ID} .ac-text { color: var(--ac-message-text); white-space: pre-wrap; }
+
+            /* Mentions are visually ordinary for people who are not the target. */
+            #${PANEL_ID} .ac-mention {
+                color: inherit;
+                background: transparent;
+                border: 0;
+                border-radius: 3px;
+                padding: 0;
+                font: inherit;
+                text-shadow: inherit;
+            }
+
+            #${PANEL_ID} .ac-mention-user {
+                cursor: pointer;
+            }
+
+            #${PANEL_ID} .ac-mention-user:hover {
+                text-decoration: underline;
+            }
+
+            /* Only the current user / current faction gets the highlight. */
+            #${PANEL_ID} .ac-mention-self {
+                padding: 0 3px;
+                border: 1px solid rgba(255, 208, 92, .68);
+                background: rgba(255, 190, 55, .18);
+                color: #ffe39a;
+                font-weight: 700;
+                text-decoration: none;
+            }
+
+            #${PANEL_ID} .ac-mention-menu {
+                position: absolute;
+                left: 6px;
+                right: 105px;
+                bottom: 49px;
+                z-index: 9;
+                display: none;
+                max-height: 210px;
+                overflow-y: auto;
+                padding: 4px;
+                box-sizing: border-box;
+                border: 1px solid var(--ac-border);
+                border-radius: 5px;
+                background: var(--ac-panel-bg);
+                box-shadow: 0 4px 16px rgba(0,0,0,.62);
+            }
+
+            #${PANEL_ID} .ac-mention-menu.ac-show {
+                display: block;
+            }
+
+            #${PANEL_ID} .ac-mention-option {
+                display: flex;
+                align-items: center;
+                gap: 7px;
+                width: 100%;
+                min-height: 34px;
+                padding: 5px 7px;
+                box-sizing: border-box;
+                border: 0;
+                border-radius: 4px;
+                background: transparent;
+                color: var(--ac-text);
+                cursor: pointer;
+                text-align: left;
+                font: inherit;
+            }
+
+            #${PANEL_ID} .ac-mention-option:hover,
+            #${PANEL_ID} .ac-mention-option.ac-selected {
+                background: rgba(255,255,255,.09);
+            }
+
+            #${PANEL_ID} .ac-mention-main {
+                min-width: 0;
+                flex: 1;
+                overflow: hidden;
+                white-space: nowrap;
+                text-overflow: ellipsis;
+                font-weight: 700;
+            }
+
+            #${PANEL_ID} .ac-mention-kind {
+                flex: 0 0 auto;
+                color: var(--ac-muted);
+                font-size: 9px;
+                white-space: nowrap;
+            }
             #${PANEL_ID} .ac-title,
             #${PANEL_ID} .ac-name,
             #${PANEL_ID} .ac-text {
@@ -257,6 +400,67 @@
                 border: 1px solid #111; border-radius: 3px;
                 background: var(--ac-accent); color: #fff; cursor: pointer;
                 font-weight: 700;
+            }
+
+            #${PANEL_ID} .ac-emoji-button {
+                width: 34px;
+                min-width: 34px;
+                height: 34px;
+                border: 1px solid #111;
+                border-radius: 3px;
+                background: var(--ac-input-bg);
+                color: var(--ac-text);
+                cursor: pointer;
+                font-size: 18px;
+                line-height: 30px;
+                padding: 0;
+                touch-action: manipulation;
+            }
+
+            #${PANEL_ID} .ac-emoji-button:hover {
+                filter: brightness(1.15);
+            }
+
+            #${PANEL_ID} .ac-emoji-picker {
+                position: absolute;
+                right: 70px;
+                bottom: 49px;
+                z-index: 8;
+                display: none;
+                width: 220px;
+                max-height: 180px;
+                overflow-y: auto;
+                grid-template-columns: repeat(6, 1fr);
+                gap: 4px;
+                padding: 7px;
+                box-sizing: border-box;
+                border: 1px solid var(--ac-border);
+                border-radius: 5px;
+                background: var(--ac-panel-bg);
+                box-shadow: 0 4px 16px rgba(0,0,0,.6);
+            }
+
+            #${PANEL_ID} .ac-emoji-picker.ac-show {
+                display: grid;
+            }
+
+            #${PANEL_ID} .ac-emoji-item {
+                width: 30px;
+                height: 30px;
+                padding: 0;
+                border: 0;
+                border-radius: 4px;
+                background: transparent;
+                color: var(--ac-text);
+                cursor: pointer;
+                font-size: 20px;
+                line-height: 30px;
+                text-align: center;
+                touch-action: manipulation;
+            }
+
+            #${PANEL_ID} .ac-emoji-item:hover {
+                background: rgba(255,255,255,.08);
             }
             #${PANEL_ID} .ac-send:disabled { opacity: .45; cursor: default; }
             #${PANEL_ID} .ac-login {
@@ -437,6 +641,29 @@
                     width: 64px; min-width: 64px; height: 42px; font-size: 13px;
                     touch-action: manipulation;
                 }
+
+                #${PANEL_ID} .ac-emoji-button {
+                    width: 42px;
+                    min-width: 42px;
+                    height: 42px;
+                    font-size: 20px;
+                    line-height: 38px;
+                }
+
+                #${PANEL_ID} .ac-emoji-picker {
+                    right: 8px;
+                    bottom: 60px;
+                    width: min(260px, calc(100vw - 28px));
+                    max-height: 200px;
+                    grid-template-columns: repeat(6, 1fr);
+                }
+
+                #${PANEL_ID} .ac-mention-menu {
+                    left: 8px;
+                    right: 8px;
+                    bottom: 60px;
+                    max-height: min(240px, 36dvh);
+                }
                 #${PANEL_ID} .ac-settings {
                     top: 48px; right: 6px; width: min(220px, calc(100vw - 24px));
                 }
@@ -462,6 +689,11 @@
                 box-shadow: 0 1px 4px rgba(0,0,0,.6);
             }
             #${LAUNCHER_ID} .ac-badge.ac-show { display: block; }
+            #${LAUNCHER_ID} .ac-badge.ac-mention-badge {
+                min-width: 25px;
+                background: #9a5b17;
+                box-shadow: 0 0 0 2px rgba(255, 208, 92, .68), 0 1px 4px rgba(0,0,0,.6);
+            }
             .ac-launcher-floating {
                 position: fixed !important; right: 5px; bottom: 120px; z-index: 999999;
             }
@@ -482,20 +714,13 @@
             return {
                 visible: false,
                 minimized: false,
-                left: null,
-                top: null,
-                width: null,
-                height: null,
                 mobileExpanded: false
             };
         }
+
         return {
             visible: !!saved.visible,
             minimized: !!saved.minimized,
-            left: Number.isFinite(saved.left) ? saved.left : null,
-            top: Number.isFinite(saved.top) ? saved.top : null,
-            width: Number.isFinite(saved.width) ? saved.width : null,
-            height: Number.isFinite(saved.height) ? saved.height : null,
             mobileExpanded: !!saved.mobileExpanded
         };
     }
@@ -528,25 +753,122 @@
         GM_setValue(UI_STATE_KEY, { ...loadUiState(), ...partial });
     }
 
-    function saveCurrentPanelGeometry() {
-        if (!ui.panel || isMobileLayout()) return;
+    function loadDesktopGeometry() {
+        const saved = GM_getValue(DESKTOP_GEOMETRY_KEY, null);
+
+        if (
+            saved &&
+            typeof saved === 'object' &&
+            Number.isFinite(saved.left) &&
+            Number.isFinite(saved.top) &&
+            Number.isFinite(saved.width) &&
+            Number.isFinite(saved.height)
+        ) {
+            return {
+                left: saved.left,
+                top: saved.top,
+                width: saved.width,
+                height: saved.height
+            };
+        }
+
+        // One-time migration from versions that stored desktop geometry
+        // inside the generic UI state object.
+        const legacy = GM_getValue(UI_STATE_KEY, null);
+        if (
+            legacy &&
+            typeof legacy === 'object' &&
+            Number.isFinite(legacy.left) &&
+            Number.isFinite(legacy.top) &&
+            Number.isFinite(legacy.width) &&
+            Number.isFinite(legacy.height)
+        ) {
+            const migrated = {
+                left: legacy.left,
+                top: legacy.top,
+                width: legacy.width,
+                height: legacy.height
+            };
+            GM_setValue(DESKTOP_GEOMETRY_KEY, migrated);
+            return migrated;
+        }
+
+        return null;
+    }
+
+    function writeDesktopGeometry(geometry) {
+        if (
+            !geometry ||
+            !Number.isFinite(geometry.left) ||
+            !Number.isFinite(geometry.top) ||
+            !Number.isFinite(geometry.width) ||
+            !Number.isFinite(geometry.height)
+        ) {
+            return false;
+        }
+
+        GM_setValue(DESKTOP_GEOMETRY_KEY, {
+            left: Math.round(geometry.left),
+            top: Math.round(geometry.top),
+            width: Math.round(geometry.width),
+            height: Math.round(geometry.height)
+        });
+        return true;
+    }
+
+    function readDesktopGeometryFromPanel() {
+        if (!ui.panel || isMobileLayout()) return null;
 
         const panel = ui.panel;
-        if (!panel.classList.contains('ac-visible')) return;
-        if (panel.classList.contains('ac-minimized')) return;
+        if (!panel.classList.contains('ac-visible')) return null;
+        if (panel.classList.contains('ac-minimized')) return null;
 
         const rect = panel.getBoundingClientRect();
+        if (rect.width < 260 || rect.height < 220) return null;
 
-        // Never let display:none / transitional zero-sized observations overwrite
-        // the last real desktop geometry.
-        if (rect.width < 260 || rect.height < 220) return;
-
-        saveUiState({
+        return {
             left: Math.round(rect.left),
             top: Math.round(rect.top),
             width: Math.round(rect.width),
             height: Math.round(rect.height)
-        });
+        };
+    }
+
+    function saveDesktopGeometry() {
+        const geometry = readDesktopGeometryFromPanel();
+        if (!geometry) return false;
+        return writeDesktopGeometry(geometry);
+    }
+
+    function saveCurrentPanelGeometry() {
+        return saveDesktopGeometry();
+    }
+
+    function restoreDesktopGeometry(saved = loadDesktopGeometry()) {
+        if (!ui.panel || isMobileLayout() || !saved) return false;
+
+        const panel = ui.panel;
+
+        const width = Math.max(
+            260,
+            Math.min(saved.width, Math.max(260, window.innerWidth - 16))
+        );
+        const height = Math.max(
+            220,
+            Math.min(saved.height, Math.max(220, window.innerHeight - 16))
+        );
+
+        panel.style.width = `${width}px`;
+        panel.style.height = `${height}px`;
+
+        const pos = clampPanelPosition(panel, saved.left, saved.top);
+        panel.style.left = `${pos.left}px`;
+        panel.style.top = `${pos.top}px`;
+        panel.style.right = 'auto';
+        panel.style.bottom = 'auto';
+        panel.dataset.dragged = '1';
+
+        return true;
     }
 
     function applySyncedUiState(saved) {
@@ -565,23 +887,6 @@
             }
 
             updateMobileViewport();
-        } else {
-            if (Number.isFinite(saved.width)) {
-                panel.style.width = `${Math.max(260, Math.min(saved.width, window.innerWidth - 16))}px`;
-            }
-
-            if (Number.isFinite(saved.height)) {
-                panel.style.height = `${Math.max(220, Math.min(saved.height, window.innerHeight - 16))}px`;
-            }
-
-            if (Number.isFinite(saved.left) && Number.isFinite(saved.top)) {
-                const pos = clampPanelPosition(panel, saved.left, saved.top);
-                panel.style.left = `${pos.left}px`;
-                panel.style.top = `${pos.top}px`;
-                panel.style.right = 'auto';
-                panel.style.bottom = 'auto';
-                panel.dataset.dragged = '1';
-            }
         }
 
         panel.classList.remove('ac-minimized');
@@ -618,7 +923,7 @@
     function currentUserscriptVersion() {
         return String(
             globalThis.GM_info?.script?.version ||
-            '0.1.51'
+            '0.1.56'
         );
     }
 
@@ -718,6 +1023,288 @@
         }
     }
 
+    function normalizeMentionDirectory(directory) {
+        const input = directory && typeof directory === 'object' ? directory : {};
+        const users = Array.isArray(input.users) ? input.users : [];
+        const factions = Array.isArray(input.factions) ? input.factions : [];
+
+        state.mentionDirectory = {
+            users: users
+                .filter(user => Number(user?.id) > 0 && String(user?.name || '').trim())
+                .map(user => ({
+                    type: 'user',
+                    id: Number(user.id),
+                    name: String(user.name).trim(),
+                    mention: String(user.mention || user.name).trim(),
+                    factionId: Number(user.faction_id || 0),
+                    factionName: String(user.faction_name || '').trim(),
+                })),
+            factions: factions
+                .filter(faction => Number(faction?.id) > 0 && String(faction?.name || '').trim())
+                .map(faction => ({
+                    type: 'faction',
+                    id: Number(faction.id),
+                    name: String(faction.name).trim(),
+                    mention: String(faction.mention || faction.name).trim(),
+                })),
+        };
+
+        for (const faction of state.mentionDirectory.factions) {
+            state.factionNames[String(faction.id)] = faction.name;
+        }
+    }
+
+    function mentionCandidates() {
+        const factions = state.mentionDirectory.factions.map(faction => ({
+            type: 'faction',
+            id: faction.id,
+            label: faction.mention,
+            search: `${faction.mention} ${faction.name}`.toLowerCase(),
+            detail: 'Faction',
+        }));
+
+        const users = state.mentionDirectory.users.map(user => ({
+            type: 'user',
+            id: user.id,
+            label: user.name,
+            search: `${user.name} ${user.factionName}`.toLowerCase(),
+            detail: user.factionName || state.factionNames[String(user.factionId)] || 'Member',
+        }));
+
+        return [...factions, ...users];
+    }
+
+    function mentionContext(textarea) {
+        const caret = textarea.selectionStart ?? textarea.value.length;
+        const before = textarea.value.slice(0, caret);
+
+        // Mentions intentionally support only known users/factions. There is no
+        // @everyone or @here special case.
+        const match = before.match(/(^|[\s([{])@([A-Za-z0-9_-]*)$/);
+        if (!match) return null;
+
+        const query = match[2] || '';
+        return {
+            start: caret - query.length - 1,
+            end: caret,
+            query,
+        };
+    }
+
+    function closeMentionMenu() {
+        state.mentionSuggestions = [];
+        state.mentionSelection = 0;
+        ui.mentionMenu?.classList.remove('ac-show');
+        if (ui.mentionMenu) ui.mentionMenu.textContent = '';
+    }
+
+    function renderMentionMenu() {
+        if (!ui.mentionMenu) return;
+
+        const context = mentionContext(ui.textarea);
+        if (!context) {
+            closeMentionMenu();
+            return;
+        }
+
+        const query = context.query.toLowerCase();
+        const candidates = mentionCandidates()
+            .filter(item => !query || item.search.includes(query))
+            .sort((a, b) => {
+                const aStarts = a.label.toLowerCase().startsWith(query) ? 0 : 1;
+                const bStarts = b.label.toLowerCase().startsWith(query) ? 0 : 1;
+                if (aStarts !== bStarts) return aStarts - bStarts;
+                if (a.type !== b.type) return a.type === 'faction' ? -1 : 1;
+                return a.label.localeCompare(b.label);
+            })
+            .slice(0, 8);
+
+        state.mentionSuggestions = candidates;
+        if (state.mentionSelection >= candidates.length) state.mentionSelection = 0;
+
+        ui.mentionMenu.textContent = '';
+
+        if (!candidates.length) {
+            ui.mentionMenu.classList.remove('ac-show');
+            return;
+        }
+
+        candidates.forEach((item, index) => {
+            const option = el(
+                'button',
+                `ac-mention-option${index === state.mentionSelection ? ' ac-selected' : ''}`
+            );
+            option.type = 'button';
+
+            const main = el('span', 'ac-mention-main', `@${item.label}`);
+            const kind = el('span', 'ac-mention-kind', item.detail);
+            option.append(main, kind);
+
+            option.addEventListener('mousedown', event => {
+                // Keep textarea selection/caret intact until the choice is inserted.
+                event.preventDefault();
+            });
+
+            option.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                insertMentionSuggestion(item);
+            });
+
+            ui.mentionMenu.appendChild(option);
+        });
+
+        ui.mentionMenu.classList.add('ac-show');
+    }
+
+    function insertMentionSuggestion(item) {
+        const context = mentionContext(ui.textarea);
+        if (!context || !item) return;
+
+        const before = ui.textarea.value.slice(0, context.start);
+        const after = ui.textarea.value.slice(context.end);
+        const visibleMention = `@${item.label} `;
+
+        ui.textarea.value = `${before}${visibleMention}${after}`;
+        const caret = before.length + visibleMention.length;
+        ui.textarea.focus();
+        ui.textarea.setSelectionRange(caret, caret);
+        ui.textarea.dispatchEvent(new Event('input', { bubbles: true }));
+        closeMentionMenu();
+    }
+
+    function encodeMentions(text) {
+        const factionMap = new Map();
+        for (const faction of state.mentionDirectory.factions) {
+            factionMap.set(String(faction.mention).toLowerCase(), faction);
+        }
+
+        const userMap = new Map();
+        for (const user of state.mentionDirectory.users) {
+            userMap.set(String(user.name).toLowerCase(), user);
+        }
+
+        return String(text || '').replace(
+            /(^|[\s([{])@([A-Za-z0-9_-]+)/g,
+            (match, prefix, rawName) => {
+                const key = rawName.toLowerCase();
+
+                // Faction aliases intentionally win exact collisions, making
+                // @Almanac / @FLUX deterministic group tags.
+                const faction = factionMap.get(key);
+                if (faction) {
+                    const fallback = String(faction.mention).replace(/[^A-Za-z0-9_-]/g, '');
+                    return `${prefix}<@f:${faction.id}:${fallback}>`;
+                }
+
+                const user = userMap.get(key);
+                if (user) {
+                    const fallback = String(user.name).replace(/[^A-Za-z0-9_-]/g, '');
+                    return `${prefix}<@u:${user.id}:${fallback}>`;
+                }
+
+                // Unknown mentions, including @everyone and @here, remain plain text.
+                return match;
+            }
+        );
+    }
+
+    function parseMentionTokenText(text) {
+        const fragment = document.createDocumentFragment();
+        const tokenPattern = /<@(u|f):(\d+):([A-Za-z0-9_-]{1,64})>/g;
+        let lastIndex = 0;
+        let mentionsMe = false;
+        let match;
+
+        while ((match = tokenPattern.exec(String(text || ''))) !== null) {
+            if (match.index > lastIndex) {
+                fragment.appendChild(
+                    document.createTextNode(text.slice(lastIndex, match.index))
+                );
+            }
+
+            const type = match[1];
+            const id = Number(match[2]);
+            const fallback = match[3];
+
+            let label = fallback;
+            let targeted = false;
+
+            if (type === 'u') {
+                const user = state.mentionDirectory.users.find(entry => entry.id === id);
+                if (user?.name) label = user.name;
+                targeted = Number(state.me?.id) === id;
+            } else {
+                const faction = state.mentionDirectory.factions.find(entry => entry.id === id);
+                if (faction?.mention) label = faction.mention;
+                targeted = Number(state.me?.faction_id) === id;
+            }
+
+            if (targeted) mentionsMe = true;
+
+            const mention = el(
+                'span',
+                `ac-mention${type === 'u' ? ' ac-mention-user' : ''}${targeted ? ' ac-mention-self' : ''}`,
+                `@${label}`
+            );
+
+            mention.dataset.mentionType = type;
+            mention.dataset.mentionId = String(id);
+
+            if (type === 'u') {
+                mention.setAttribute('role', 'link');
+                mention.setAttribute('tabindex', '0');
+
+                const openMentionProfile = () => {
+                    if (!id) return;
+                    window.open(
+                        `https://www.torn.com/profiles.php?XID=${encodeURIComponent(id)}`,
+                        '_blank',
+                        'noopener,noreferrer'
+                    );
+                };
+
+                mention.addEventListener('click', openMentionProfile);
+                mention.addEventListener('keydown', event => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        openMentionProfile();
+                    }
+                });
+            }
+
+            fragment.appendChild(mention);
+            lastIndex = tokenPattern.lastIndex;
+        }
+
+        if (lastIndex < String(text || '').length) {
+            fragment.appendChild(document.createTextNode(text.slice(lastIndex)));
+        }
+
+        return { fragment, mentionsMe };
+    }
+
+    function replaceEmojiShortcodes(text) {
+        return String(text || '').replace(
+            /:([a-z0-9_+-]+):/gi,
+            (match, name) => EMOJI_SHORTCODES[name.toLowerCase()] || match
+        );
+    }
+
+    function insertTextAtCursor(textarea, text) {
+        const start = textarea.selectionStart ?? textarea.value.length;
+        const end = textarea.selectionEnd ?? textarea.value.length;
+        const before = textarea.value.slice(0, start);
+        const after = textarea.value.slice(end);
+
+        textarea.value = `${before}${text}${after}`;
+
+        const nextPos = start + text.length;
+        textarea.focus();
+        textarea.setSelectionRange(nextPos, nextPos);
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
     function buildPanel() {
         if (document.getElementById(PANEL_ID)) return;
         const panel = el('div');
@@ -763,9 +1350,31 @@
         const textarea = document.createElement('textarea');
         textarea.placeholder = 'Type your message here...';
         textarea.maxLength = state.maxMessageChars;
+
+        const emojiButton = el('button', 'ac-emoji-button', '☺');
+        emojiButton.type = 'button';
+        emojiButton.title = 'Emoji';
+
         const send = el('button', 'ac-send', 'Send');
         send.type = 'button'; send.disabled = true;
-        composer.append(textarea, send);
+
+        composer.append(textarea, emojiButton, send);
+
+        const mentionMenu = el('div', 'ac-mention-menu');
+
+        const emojiPicker = el('div', 'ac-emoji-picker');
+        for (const emoji of EMOJI_PICKER_ITEMS) {
+            const item = el('button', 'ac-emoji-item', emoji);
+            item.type = 'button';
+            item.title = emoji;
+            item.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                insertTextAtCursor(textarea, emoji);
+                emojiPicker.classList.remove('ac-show');
+            });
+            emojiPicker.appendChild(item);
+        }
 
         const login = el('div', 'ac-login');
         const loginTitle = el('h3', '', 'Alliance Chat authentication');
@@ -833,9 +1442,9 @@
 
         login.append(loginTitle, loginInfo, actions, shortNote, privacy, loginError);
 
-        panel.append(header, status, body, composer, login, settings);
+        panel.append(header, status, body, composer, mentionMenu, emojiPicker, login, settings);
         document.body.appendChild(panel);
-        ui = { panel, header, title, online, settingsButton, mobileSizeButton, min, close, status, body, textarea, send, login, input, loginButton, loginError, settings, themeSelect };
+        ui = { panel, header, title, online, settingsButton, mobileSizeButton, min, close, status, body, textarea, mentionMenu, emojiButton, emojiPicker, send, login, input, loginButton, loginError, settings, themeSelect };
 
         applyTheme(state.theme, false);
 
@@ -846,22 +1455,7 @@
             mobileSizeButton.textContent = savedUi.mobileExpanded ? '▣' : '⛶';
             mobileSizeButton.title = savedUi.mobileExpanded ? 'Compact chat' : 'Expand chat';
         } else {
-            if (savedUi.left !== null && savedUi.top !== null) {
-                const pos = clampPanelPosition(panel, savedUi.left, savedUi.top);
-                panel.style.left = `${pos.left}px`;
-                panel.style.top = `${pos.top}px`;
-                panel.style.right = 'auto';
-                panel.style.bottom = 'auto';
-                panel.dataset.dragged = '1';
-            }
-
-            if (savedUi.width !== null) {
-                panel.style.width = `${Math.max(260, Math.min(savedUi.width, window.innerWidth - 16))}px`;
-            }
-
-            if (savedUi.height !== null) {
-                panel.style.height = `${Math.max(220, Math.min(savedUi.height, window.innerHeight - 16))}px`;
-            }
+            restoreDesktopGeometry();
         }
 
         if (savedUi.minimized) panel.classList.add('ac-minimized');
@@ -927,8 +1521,58 @@
             saveUiState({ visible: false });
             schedulePoll(POLL_CLOSED_MS);
         });
+        emojiButton.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            closeMentionMenu();
+            emojiPicker.classList.toggle('ac-show');
+        });
+
+        document.addEventListener('click', (e) => {
+            if (!emojiPicker.classList.contains('ac-show')) return;
+            if (emojiPicker.contains(e.target) || e.target === emojiButton) return;
+            emojiPicker.classList.remove('ac-show');
+        });
+
         send.addEventListener('click', sendMessage);
+
+        textarea.addEventListener('input', () => {
+            renderMentionMenu();
+        });
+
+        textarea.addEventListener('click', () => {
+            renderMentionMenu();
+        });
+
         textarea.addEventListener('keydown', (e) => {
+            const mentionOpen =
+                ui.mentionMenu?.classList.contains('ac-show') &&
+                state.mentionSuggestions.length > 0;
+
+            if (mentionOpen && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+                e.preventDefault();
+                const delta = e.key === 'ArrowDown' ? 1 : -1;
+                const length = state.mentionSuggestions.length;
+                state.mentionSelection = (state.mentionSelection + delta + length) % length;
+                renderMentionMenu();
+                return;
+            }
+
+            if (mentionOpen && (e.key === 'Enter' || e.key === 'Tab')) {
+                e.preventDefault();
+                insertMentionSuggestion(
+                    state.mentionSuggestions[state.mentionSelection] ||
+                    state.mentionSuggestions[0]
+                );
+                return;
+            }
+
+            if (mentionOpen && e.key === 'Escape') {
+                e.preventDefault();
+                closeMentionMenu();
+                return;
+            }
+
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 sendMessage();
@@ -951,30 +1595,8 @@
         });
         makeDraggable(panel, header);
 
-        let resizeSaveTimer = null;
-        const resizeObserver = new ResizeObserver(() => {
-            if (isMobileLayout()) return;
-            if (!panel.classList.contains('ac-visible')) return;
-            if (panel.classList.contains('ac-minimized')) return;
-            if (panel.dataset.syncingUi === '1') return;
+        installDesktopResizePersistence(panel);
 
-            clearTimeout(resizeSaveTimer);
-            resizeSaveTimer = setTimeout(() => {
-                if (!panel.classList.contains('ac-visible')) return;
-
-                const rect = panel.getBoundingClientRect();
-                if (rect.width < 260 || rect.height < 220) return;
-
-                saveUiState({
-                    left: Math.round(rect.left),
-                    top: Math.round(rect.top),
-                    width: Math.round(rect.width),
-                    height: Math.round(rect.height)
-                });
-            }, 150);
-        });
-
-        resizeObserver.observe(panel);
         updateMobileViewport();
     }
 
@@ -1081,6 +1703,7 @@
             if (isMobileLayout()) updateMobileViewport();
 
             state.unread = 0;
+            state.mentionUnread = 0;
             updateBadge();
 
             positionPanelNearTornChat();
@@ -1096,6 +1719,12 @@
 
     function positionPanelNearTornChat() {
         if (!ui.panel || ui.panel.dataset.dragged === '1') return;
+
+        const saved = loadDesktopGeometry();
+        if (saved) {
+            restoreDesktopGeometry(saved);
+            return;
+        }
         const tornWindow = document.querySelector('#chatRoot [id^="faction-"]');
         if (tornWindow) {
             const r = tornWindow.getBoundingClientRect();
@@ -1135,24 +1764,7 @@
             mobileCompactHeight = null;
             mobileKeyboardWasOpen = false;
 
-            const saved = loadUiState();
-
-            if (saved.width !== null) {
-                panel.style.width = `${Math.max(260, Math.min(saved.width, window.innerWidth - 16))}px`;
-            }
-
-            if (saved.height !== null) {
-                panel.style.height = `${Math.max(220, Math.min(saved.height, window.innerHeight - 16))}px`;
-            }
-
-            if (saved.left !== null && saved.top !== null) {
-                const pos = clampPanelPosition(panel, saved.left, saved.top);
-                panel.style.left = `${pos.left}px`;
-                panel.style.top = `${pos.top}px`;
-                panel.style.right = 'auto';
-                panel.style.bottom = 'auto';
-                panel.dataset.dragged = '1';
-            }
+            restoreDesktopGeometry();
 
             if (ui.mobileSizeButton) {
                 ui.mobileSizeButton.textContent = '⛶';
@@ -1222,28 +1834,85 @@
         }
     }
 
+    function installDesktopResizePersistence(panel) {
+        let resizing = false;
+        let saveTimer = null;
+
+        const RESIZE_GRAB_PX = 18;
+
+        const isResizeGrab = (event) => {
+            if (isMobileLayout()) return false;
+            if (!panel.classList.contains('ac-visible')) return false;
+
+            const rect = panel.getBoundingClientRect();
+            const nearRight = event.clientX >= rect.right - RESIZE_GRAB_PX;
+            const nearBottom = event.clientY >= rect.bottom - RESIZE_GRAB_PX;
+
+            return nearRight && nearBottom;
+        };
+
+        panel.addEventListener('mousedown', (event) => {
+            if (!isResizeGrab(event)) return;
+            resizing = true;
+        }, true);
+
+        document.addEventListener('mousemove', () => {
+            if (!resizing) return;
+
+            clearTimeout(saveTimer);
+            saveTimer = setTimeout(() => {
+                saveDesktopGeometry();
+            }, 120);
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (!resizing) return;
+            resizing = false;
+            clearTimeout(saveTimer);
+
+            requestAnimationFrame(() => {
+                saveDesktopGeometry();
+            });
+        });
+    }
+
     function makeDraggable(panel, handle) {
         let dragging = false, dx = 0, dy = 0;
+        let dragSaveTimer = null;
+
         handle.addEventListener('mousedown', (e) => {
             if (isMobileLayout()) return;
             if (e.target.closest('button')) return;
+
             const r = panel.getBoundingClientRect();
-            dragging = true; dx = e.clientX - r.left; dy = e.clientY - r.top;
+            dragging = true;
+            dx = e.clientX - r.left;
+            dy = e.clientY - r.top;
             panel.dataset.dragged = '1';
-            panel.style.right = 'auto'; panel.style.bottom = 'auto';
+            panel.style.right = 'auto';
+            panel.style.bottom = 'auto';
             e.preventDefault();
         });
+
         document.addEventListener('mousemove', (e) => {
             if (!dragging) return;
+
             const x = Math.min(window.innerWidth - panel.offsetWidth, Math.max(0, e.clientX - dx));
             const y = Math.min(window.innerHeight - 38, Math.max(0, e.clientY - dy));
-            panel.style.left = `${x}px`; panel.style.top = `${y}px`;
+            panel.style.left = `${x}px`;
+            panel.style.top = `${y}px`;
+
+            // Persist while dragging too, so browser/tab termination does not lose
+            // the latest position if mouseup/pagehide never fires.
+            clearTimeout(dragSaveTimer);
+            dragSaveTimer = setTimeout(() => saveDesktopGeometry(), 120);
         });
+
         document.addEventListener('mouseup', () => {
             if (!dragging) return;
             dragging = false;
-
-            saveCurrentPanelGeometry();
+            clearTimeout(dragSaveTimer);
+            saveDesktopGeometry();
         });
     }
 
@@ -1465,6 +2134,10 @@
         state.oldestHistorySeq = 0;
         state.historyLoading = false;
         state.historyExhausted = false;
+        state.mentionUnread = 0;
+        state.mentionDirectory = { users: [], factions: [] };
+        state.mentionSuggestions = [];
+        state.mentionSelection = 0;
         state.seenMessageIds.clear();
         GM_deleteValue(TOKEN_KEY);
         GM_deleteValue(REFRESH_TOKEN_KEY);
@@ -1487,6 +2160,7 @@
         state.keyVersion = data.key_version;
         state.me = data.user;
         state.factionNames = { ...state.factionNames, ...(data.faction_names || {}) };
+        normalizeMentionDirectory(data.mention_directory);
         if (data.user?.faction_name) {
             state.factionNames[String(data.user.faction_id)] = data.user.faction_name;
         }
@@ -1664,6 +2338,7 @@
             };
 
             let newUnread = 0;
+            let newMentionUnread = 0;
 
             for (const msg of data.messages || []) {
                 state.lastCursor = Math.max(
@@ -1673,7 +2348,7 @@
 
                 if (!rememberMessage(msg)) continue;
 
-                await renderEncryptedMessage(msg);
+                const renderInfo = await renderEncryptedMessage(msg);
 
                 const panelClosed = !ui.panel.classList.contains('ac-visible');
                 const minimized = ui.panel.classList.contains('ac-minimized');
@@ -1683,6 +2358,7 @@
                     // In-page notification only: no sound, OS notification,
                     // title flashing, focus stealing, or background alerting.
                     newUnread++;
+                    if (renderInfo?.mentionsMe) newMentionUnread++;
                 }
             }
 
@@ -1693,6 +2369,7 @@
 
             if (newUnread > 0) {
                 state.unread += newUnread;
+                state.mentionUnread += newMentionUnread;
                 updateBadge();
             }
 
@@ -1721,12 +2398,16 @@
     }
 
     async function sendMessage() {
-        const text = ui.textarea.value.trim();
+        const originalText = ui.textarea.value;
+        const emojiText = replaceEmojiShortcodes(originalText);
+        const text = encodeMentions(emojiText).trim();
 
         if (!text || !state.cryptoKey || !state.token) return;
         if (text.length > state.maxMessageChars) return;
 
         ui.textarea.value = '';
+        closeMentionMenu();
+        ui.emojiPicker?.classList.remove('ac-show');
         ui.send.disabled = true;
 
         try {
@@ -1758,17 +2439,17 @@
             schedulePoll(0);
         } catch (err) {
             if (err.status === 409) {
-                ui.textarea.value = text;
+                ui.textarea.value = originalText;
                 addSystem('Room key changed. Refreshing encryption state...', true);
                 try {
                     await loadBootstrap(true);
                 } catch (_) {}
             } else if (err.status === 401 || err.status === 403) {
-                ui.textarea.value = text;
+                ui.textarea.value = originalText;
                 logoutLocal();
                 showLogin('Session expired or faction access was revoked.');
             } else {
-                ui.textarea.value = text;
+                ui.textarea.value = originalText;
                 addSystem(`Could not send message: ${err.message}`, true);
             }
         } finally {
@@ -1852,7 +2533,13 @@
 
         const faction = el('span', 'ac-faction', `[${factionName}]`);
         const stamp = el('span', 'ac-time', formatTime(msg.created_at));
-        const body = el('div', 'ac-text', text); // textContent: no message HTML execution.
+        const body = el('div', 'ac-text');
+
+        // Still no innerHTML: plaintext pieces are Text nodes and recognized
+        // mention tokens become spans created by this userscript.
+        const parsed = parseMentionTokenText(text);
+        body.appendChild(parsed.fragment);
+
         meta.append(name, faction, stamp);
         wrap.append(meta, body);
 
@@ -1862,6 +2549,8 @@
             ui.body.appendChild(wrap);
             scrollBottom();
         }
+
+        return { mentionsMe: parsed.mentionsMe };
     }
 
     function addSystem(text, isError = false) {
@@ -1907,7 +2596,16 @@
         const launcher = document.getElementById(LAUNCHER_ID);
         const badge = launcher?.querySelector('.ac-badge');
         if (!badge) return;
-        badge.textContent = state.unread > 99 ? '99+' : String(state.unread);
+
+        if (state.mentionUnread > 0) {
+            const mentionCount = state.mentionUnread > 99 ? '99+' : String(state.mentionUnread);
+            badge.textContent = `@${mentionCount}`;
+            badge.classList.add('ac-mention-badge');
+        } else {
+            badge.textContent = state.unread > 99 ? '99+' : String(state.unread);
+            badge.classList.remove('ac-mention-badge');
+        }
+
         badge.classList.toggle('ac-show', state.unread > 0);
     }
 
@@ -1915,6 +2613,21 @@
         GM_addValueChangeListener(UI_STATE_KEY, (_name, _oldValue, newValue, remote) => {
             if (!remote) return;
             applySyncedUiState(newValue);
+        });
+
+        GM_addValueChangeListener(DESKTOP_GEOMETRY_KEY, (_name, _oldValue, newValue, remote) => {
+            if (!remote || isMobileLayout()) return;
+            if (!newValue || typeof newValue !== 'object') return;
+
+            const panel = ui.panel;
+            if (!panel) return;
+
+            panel.dataset.syncingUi = '1';
+            restoreDesktopGeometry(newValue);
+
+            setTimeout(() => {
+                if (panel) delete panel.dataset.syncingUi;
+            }, 250);
         });
 
         GM_addValueChangeListener(THEME_KEY, (_name, _oldValue, newValue, remote) => {
@@ -2039,6 +2752,16 @@
     window.addEventListener('focus', () => {
         wakePolling();
         checkForUserscriptUpdate();
+    });
+
+    let desktopViewportClampTimer = null;
+    window.addEventListener('resize', () => {
+        if (isMobileLayout()) return;
+
+        clearTimeout(desktopViewportClampTimer);
+        desktopViewportClampTimer = setTimeout(() => {
+            restoreDesktopGeometry();
+        }, 200);
     });
 
     window.addEventListener('pagehide', () => {
