@@ -3,7 +3,7 @@
 // @namespace    almanac.shared.chat
 // @updateURL   https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
 // @downloadURL https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
-// @version      0.1.56
+// @version      0.1.57
 // @description  Secure shared chat for approved Torn factions using CSP-safe HTTP polling; does not scrape Torn pages.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -39,6 +39,17 @@
     const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
     const HISTORY_PAGE_SIZE = 20;
     const HISTORY_MAX_LOADED = 100;
+
+    // Notification reliability:
+    // - active/open: fast polling
+    // - active/closed: normal polling
+    // - background: exactly one elected Torn tab polls
+    const POLL_BACKGROUND_MS = 25000;
+    const UNREAD_STATE_KEY = 'alliance_chat_unread_state_v1';
+    const NOTIFY_LEADER_KEY = 'alliance_chat_notify_leader_v1';
+    const NOTIFY_LEASE_MS = 20000;
+    const NOTIFY_HEARTBEAT_MS = 8000;
+    const TAB_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 
     const THEME_ASSETS = {
         almanac: {
@@ -127,6 +138,10 @@
         maxMessageChars: 1000,
         unread: 0,
         mentionUnread: 0,
+        unreadMessageIds: new Set(),
+        mentionUnreadMessageIds: new Set(),
+        notifyLeader: false,
+        notifyHeartbeatTimer: null,
         mentionDirectory: { users: [], factions: [] },
         mentionSuggestions: [],
         mentionSelection: 0,
@@ -152,6 +167,152 @@
     // it only prevents keyboard open/close from slightly changing the compact size.
     let mobileCompactHeight = null;
     let mobileKeyboardWasOpen = false;
+
+    function applySharedUnreadValue(saved) {
+        const ids = Array.isArray(saved?.ids)
+            ? saved.ids.map(String).filter(Boolean).slice(-100)
+            : [];
+
+        const idSet = new Set(ids);
+
+        const mentionIds = Array.isArray(saved?.mentionIds)
+            ? saved.mentionIds
+                .map(String)
+                .filter(id => id && idSet.has(id))
+                .slice(-100)
+            : [];
+
+        state.unreadMessageIds = idSet;
+        state.mentionUnreadMessageIds = new Set(mentionIds);
+        state.unread = state.unreadMessageIds.size;
+        state.mentionUnread = state.mentionUnreadMessageIds.size;
+        updateBadge();
+    }
+
+    function loadSharedUnread() {
+        applySharedUnreadValue(GM_getValue(UNREAD_STATE_KEY, null));
+    }
+
+    function saveSharedUnread() {
+        const ids = [...state.unreadMessageIds].slice(-100);
+        const idSet = new Set(ids);
+        const mentionIds = [...state.mentionUnreadMessageIds]
+            .filter(id => idSet.has(id))
+            .slice(-100);
+
+        state.unreadMessageIds = new Set(ids);
+        state.mentionUnreadMessageIds = new Set(mentionIds);
+        state.unread = ids.length;
+        state.mentionUnread = mentionIds.length;
+
+        GM_setValue(UNREAD_STATE_KEY, {
+            ids,
+            mentionIds,
+            updatedAt: Date.now(),
+            updatedBy: TAB_ID,
+        });
+
+        updateBadge();
+    }
+
+    function addSharedUnread(messageId, mentionsMe = false) {
+        const id = String(messageId || '');
+        if (!id) return;
+
+        // Merge with the latest shared value immediately before writing. This keeps
+        // two active Torn tabs from overwriting each other's unread IDs.
+        const saved = GM_getValue(UNREAD_STATE_KEY, null);
+
+        const ids = new Set(
+            Array.isArray(saved?.ids)
+                ? saved.ids.map(String).filter(Boolean)
+                : []
+        );
+
+        const mentionIds = new Set(
+            Array.isArray(saved?.mentionIds)
+                ? saved.mentionIds.map(String).filter(Boolean)
+                : []
+        );
+
+        ids.add(id);
+        if (mentionsMe) mentionIds.add(id);
+
+        const trimmedIds = [...ids].slice(-100);
+        const trimmedSet = new Set(trimmedIds);
+
+        state.unreadMessageIds = trimmedSet;
+        state.mentionUnreadMessageIds = new Set(
+            [...mentionIds].filter(value => trimmedSet.has(value)).slice(-100)
+        );
+
+        saveSharedUnread();
+    }
+
+    function clearSharedUnread() {
+        state.unreadMessageIds.clear();
+        state.mentionUnreadMessageIds.clear();
+        state.unread = 0;
+        state.mentionUnread = 0;
+
+        GM_setValue(UNREAD_STATE_KEY, {
+            ids: [],
+            mentionIds: [],
+            updatedAt: Date.now(),
+            updatedBy: TAB_ID,
+        });
+
+        updateBadge();
+    }
+
+    function refreshNotifyLeadership() {
+        const now = Date.now();
+        const lease = GM_getValue(NOTIFY_LEADER_KEY, null);
+
+        const expired =
+            !lease ||
+            typeof lease !== 'object' ||
+            !Number.isFinite(Number(lease.expiresAt)) ||
+            Number(lease.expiresAt) <= now;
+
+        const mine = lease?.tabId === TAB_ID;
+
+        if (expired || mine) {
+            GM_setValue(NOTIFY_LEADER_KEY, {
+                tabId: TAB_ID,
+                expiresAt: now + NOTIFY_LEASE_MS,
+            });
+            state.notifyLeader = true;
+        } else {
+            state.notifyLeader = false;
+        }
+
+        return state.notifyLeader;
+    }
+
+    function startNotifyLeadership() {
+        refreshNotifyLeadership();
+
+        if (state.notifyHeartbeatTimer) {
+            clearInterval(state.notifyHeartbeatTimer);
+        }
+
+        state.notifyHeartbeatTimer = setInterval(() => {
+            const wasLeader = state.notifyLeader;
+            refreshNotifyLeadership();
+
+            // If this background tab just acquired the lease, wake it immediately
+            // instead of waiting for the next 25-second background timer.
+            if (
+                !isPageActive() &&
+                state.notifyLeader &&
+                state.initialized &&
+                !wasLeader
+            ) {
+                schedulePoll(0);
+            }
+        }, NOTIFY_HEARTBEAT_MS);
+    }
 
     function addStyles() {
         if (document.getElementById('almanac-alliance-chat-css')) return;
@@ -923,7 +1084,7 @@
     function currentUserscriptVersion() {
         return String(
             globalThis.GM_info?.script?.version ||
-            '0.1.56'
+            '0.1.57'
         );
     }
 
@@ -1620,6 +1781,9 @@
             launcher.parentElement?.dataset?.allianceWrapper === '1' &&
             launcher.parentElement?.parentElement === controlsContainer
         ) {
+            // Torn can rebuild surrounding React UI without changing our JS state.
+            // Re-apply the persisted badge every time we verify the launcher.
+            updateBadge();
             return;
         }
 
@@ -1702,9 +1866,7 @@
             saveUiState({ visible: true, minimized: false });
             if (isMobileLayout()) updateMobileViewport();
 
-            state.unread = 0;
-            state.mentionUnread = 0;
-            updateBadge();
+            clearSharedUnread();
 
             positionPanelNearTornChat();
             checkForUserscriptUpdate();
@@ -1713,8 +1875,13 @@
 
         wrapper.appendChild(button);
 
-        // Insert ALLY as its own flex item immediately before Faction.
+        // Insert FLUX as its own flex item immediately before Faction.
         controlsContainer.insertBefore(wrapper, factionWrapper);
+
+        // A newly recreated Torn launcher starts with a hidden "0" badge. Restore
+        // the actual shared unread state immediately instead of waiting for the
+        // next incoming message.
+        updateBadge();
     }
 
     function positionPanelNearTornChat() {
@@ -2060,7 +2227,7 @@
         }
     }
 
-    async function startIfNeeded() {
+    async function startIfNeeded(renderHistory = true, interactive = true) {
         if (state.bootstrapInFlight) {
             return state.bootstrapInFlight;
         }
@@ -2075,7 +2242,7 @@
             }
 
             if (!state.token) {
-                showLogin();
+                if (interactive) showLogin();
                 return;
             }
 
@@ -2088,7 +2255,7 @@
                     state.pollTimer = null;
                 }
 
-                await loadBootstrap(true);
+                await loadBootstrap(renderHistory);
                 state.initialized = true;
                 startPolling();
             } catch (err) {
@@ -2096,12 +2263,20 @@
 
                 if (err.status === 401 || err.status === 403) {
                     logoutLocal();
-                    showLogin(err.status === 403
-                        ? 'Your faction is not authorized.'
-                        : 'Session expired. Verify again.');
+
+                    if (interactive) {
+                        showLogin(err.status === 403
+                            ? 'Your faction is not authorized.'
+                            : 'Session expired. Verify again.');
+                    } else {
+                        renderConnectionState('offline');
+                    }
                 } else {
                     setStatus(`Connection error: ${err.message}`, true);
-                    setTimeout(() => startIfNeeded(), 5000);
+                    setTimeout(
+                        () => startIfNeeded(renderHistory, interactive),
+                        5000
+                    );
                 }
             }
         })();
@@ -2134,7 +2309,6 @@
         state.oldestHistorySeq = 0;
         state.historyLoading = false;
         state.historyExhausted = false;
-        state.mentionUnread = 0;
         state.mentionDirectory = { users: [], factions: [] };
         state.mentionSuggestions = [];
         state.mentionSelection = 0;
@@ -2201,6 +2375,8 @@
     }
 
     function pollDelay() {
+        if (!isPageActive()) return POLL_BACKGROUND_MS;
+
         const visible = ui.panel?.classList.contains('ac-visible');
         return visible ? POLL_OPEN_MS : POLL_CLOSED_MS;
     }
@@ -2316,7 +2492,12 @@
 
     async function pollOnce(force = false) {
         if (!state.token || !state.initialized || state.pollInFlight) return;
-        if (!force && !isPageActive()) return;
+
+        const pageActive = isPageActive();
+
+        // Active Torn tabs may always poll. When Torn is hidden/unfocused, only
+        // the one tab holding the short notification lease is allowed to poll.
+        if (!force && !pageActive && !refreshNotifyLeadership()) return;
 
         state.pollInFlight = true;
 
@@ -2337,9 +2518,6 @@
                 ...(data.faction_names || {})
             };
 
-            let newUnread = 0;
-            let newMentionUnread = 0;
-
             for (const msg of data.messages || []) {
                 state.lastCursor = Math.max(
                     state.lastCursor,
@@ -2352,13 +2530,20 @@
 
                 const panelClosed = !ui.panel.classList.contains('ac-visible');
                 const minimized = ui.panel.classList.contains('ac-minimized');
+                const pageInactive = !isPageActive();
                 const fromOtherUser = Number(msg.sender_id) !== Number(state.me?.id);
 
-                if ((panelClosed || minimized) && fromOtherUser) {
-                    // In-page notification only: no sound, OS notification,
-                    // title flashing, focus stealing, or background alerting.
-                    newUnread++;
-                    if (renderInfo?.mentionsMe) newMentionUnread++;
+                if (
+                    fromOtherUser &&
+                    (panelClosed || minimized || pageInactive) &&
+                    (isPageActive() || state.notifyLeader)
+                ) {
+                    // Shared ID storage deduplicates the same message across Torn tabs.
+                    // Mention IDs are a subset of ordinary unread IDs.
+                    addSharedUnread(
+                        msg.message_id,
+                        Boolean(renderInfo?.mentionsMe)
+                    );
                 }
             }
 
@@ -2366,12 +2551,6 @@
                 state.lastCursor,
                 Number(data.cursor || 0)
             );
-
-            if (newUnread > 0) {
-                state.unread += newUnread;
-                state.mentionUnread += newMentionUnread;
-                updateBadge();
-            }
 
             state.pollFailures = 0;
             renderConnectionState('Connected');
@@ -2640,10 +2819,32 @@
             state.updateAvailable = String(newValue || '');
             renderConnectionState();
         });
+
+        GM_addValueChangeListener(UNREAD_STATE_KEY, (_name, _oldValue, newValue, remote) => {
+            if (!remote) return;
+            applySharedUnreadValue(newValue);
+        });
+
+        GM_addValueChangeListener(NOTIFY_LEADER_KEY, (_name, _oldValue, newValue, remote) => {
+            if (!remote) return;
+
+            state.notifyLeader =
+                newValue?.tabId === TAB_ID &&
+                Number(newValue?.expiresAt || 0) > Date.now();
+
+            // If another tab releases/expires the lease while this one is hidden,
+            // the heartbeat will acquire it shortly; waking here reduces the gap.
+            if (!isPageActive() && state.initialized && !newValue?.tabId) {
+                refreshNotifyLeadership();
+                if (state.notifyLeader) schedulePoll(0);
+            }
+        });
     }
 
     function boot() {
         preloadThemeAssets();
+        loadSharedUnread();
+        startNotifyLeadership();
 
         addStyles();
         buildPanel();
@@ -2652,8 +2853,15 @@
         // Run after buildPanel so a discovered update can be rendered immediately.
         checkForUserscriptUpdate();
 
-        if (loadUiState().visible) {
-            startIfNeeded();
+        const savedUi = loadUiState();
+
+        if (savedUi.visible) {
+            startIfNeeded(true, true);
+        } else if (state.token || state.refreshToken) {
+            // Critical notification fix: establish the current cursor and start
+            // polling even when FLUX chat begins closed. Do this silently so an
+            // expired session does not pop the chat open by itself.
+            startIfNeeded(false, false);
         }
     }
 
@@ -2733,10 +2941,12 @@
     });
 
     const wakePolling = () => {
-        if (!state.token || !isPageActive()) return;
+        if ((!state.token && !state.refreshToken) || !isPageActive()) return;
 
-        if (ui.panel?.classList.contains('ac-visible') && !state.cryptoKey) {
-            startIfNeeded();
+        const panelVisible = ui.panel?.classList.contains('ac-visible');
+
+        if (!state.initialized || !state.cryptoKey) {
+            startIfNeeded(Boolean(panelVisible), Boolean(panelVisible));
             return;
         }
 
@@ -2747,11 +2957,25 @@
         if (document.visibilityState === 'hidden') {
             saveCurrentPanelGeometry();
         }
+
+        refreshNotifyLeadership();
         wakePolling();
+
+        if (state.initialized) {
+            // On both hide and show, replace any stale timer with the correct
+            // foreground/background cadence immediately.
+            schedulePoll(0);
+        }
     });
+
     window.addEventListener('focus', () => {
+        refreshNotifyLeadership();
         wakePolling();
         checkForUserscriptUpdate();
+
+        if (state.initialized) {
+            schedulePoll(0);
+        }
     });
 
     let desktopViewportClampTimer = null;
@@ -2770,6 +2994,19 @@
         if (state.pollTimer) {
             clearTimeout(state.pollTimer);
             state.pollTimer = null;
+        }
+
+        if (state.notifyHeartbeatTimer) {
+            clearInterval(state.notifyHeartbeatTimer);
+            state.notifyHeartbeatTimer = null;
+        }
+
+        const lease = GM_getValue(NOTIFY_LEADER_KEY, null);
+        if (lease?.tabId === TAB_ID) {
+            GM_setValue(NOTIFY_LEADER_KEY, {
+                tabId: '',
+                expiresAt: 0,
+            });
         }
     });
 
