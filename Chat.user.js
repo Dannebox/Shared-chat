@@ -3,7 +3,7 @@
 // @namespace    almanac.shared.chat
 // @updateURL   https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
 // @downloadURL https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
-// @version      0.1.57
+// @version      0.1.58
 // @description  Secure shared chat for approved Torn factions using CSP-safe HTTP polling; does not scrape Torn pages.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -1084,7 +1084,7 @@
     function currentUserscriptVersion() {
         return String(
             globalThis.GM_info?.script?.version ||
-            '0.1.57'
+            '0.1.58'
         );
     }
 
@@ -1538,11 +1538,11 @@
         }
 
         const login = el('div', 'ac-login');
-        const loginTitle = el('h3', '', 'Alliance Chat authentication');
+        const loginTitle = el('h3', '', 'FLUX Chat authentication');
         const loginInfo = el(
             'p',
             '',
-            'Create a dedicated Public Access API key for Alliance Chat, then paste it below.'
+            'Create a dedicated Public Access API key for FLUX Chat, then paste it below.'
         );
 
         const actions = el('div', 'ac-login-actions');
@@ -1578,7 +1578,7 @@
         const privacyKey = el(
             'p',
             '',
-            'API key: used for one Torn API v2 key/info request at login. It is not stored by Alliance Chat.'
+            'API key: used for one Torn API v2 key/info request at login. It is not stored by FLUX Chat.'
         );
         const privacyData = el(
             'p',
@@ -1751,7 +1751,7 @@
         });
 
         createKeyButton.addEventListener('click', () => {
-            const url = 'https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=Alliance%20Shared%20Chat&type=1';
+            const url = 'https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=FLUX%20Shared%20Chat&type=1';
             window.open(url, '_blank', 'noopener,noreferrer');
         });
         makeDraggable(panel, header);
@@ -1811,7 +1811,7 @@
         const button = el('button');
         button.id = LAUNCHER_ID;
         button.type = 'button';
-        button.title = 'Alliance Chat';
+        button.title = 'FLUX Chat';
 
         // Absolute positioning keeps the Torn flex slot intact while ensuring the
         // clickable surface is above Torn's drag/drop overlays.
@@ -1846,7 +1846,7 @@
             event.preventDefault();
             event.stopImmediatePropagation();
 
-            console.log('[AllianceChat] Launcher clicked');
+            console.log('[FLUXChat] Launcher clicked');
 
             buildPanel();
 
