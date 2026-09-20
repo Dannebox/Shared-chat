@@ -3,7 +3,7 @@
 // @namespace    almanac.shared.chat
 // @updateURL   https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
 // @downloadURL https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
-// @version      0.1.58
+// @version      0.1.59
 // @description  Secure shared chat for approved Torn factions using CSP-safe HTTP polling; does not scrape Torn pages.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -47,8 +47,13 @@
     const POLL_BACKGROUND_MS = 25000;
     const UNREAD_STATE_KEY = 'alliance_chat_unread_state_v1';
     const NOTIFY_LEADER_KEY = 'alliance_chat_notify_leader_v1';
+    const REFRESH_LOCK_KEY = 'alliance_chat_refresh_lock_v1';
     const NOTIFY_LEASE_MS = 20000;
     const NOTIFY_HEARTBEAT_MS = 8000;
+    const REFRESH_LOCK_MS = 20000;
+    const REFRESH_WAIT_MS = 22000;
+    const REQUEST_TIMEOUT_MS = 15000;
+    const MAX_RENDERED_MESSAGES = 500;
     const TAB_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 
     const THEME_ASSETS = {
@@ -140,6 +145,9 @@
         mentionUnread: 0,
         unreadMessageIds: new Set(),
         mentionUnreadMessageIds: new Set(),
+        lastReadSeq: 0,
+        unreadStateHasReadSeq: false,
+        unreadStateUserId: 0,
         notifyLeader: false,
         notifyHeartbeatTimer: null,
         mentionDirectory: { users: [], factions: [] },
@@ -169,6 +177,13 @@
     let mobileKeyboardWasOpen = false;
 
     function applySharedUnreadValue(saved) {
+        const savedUserId = Number(saved?.userId || 0);
+        const currentUserId = Number(state.me?.id || 0);
+
+        // Tampermonkey storage is shared by Torn tabs. Do not let another logged-in
+        // Torn account overwrite this account's unread state.
+        if (currentUserId && savedUserId && currentUserId !== savedUserId) return;
+
         const ids = Array.isArray(saved?.ids)
             ? saved.ids.map(String).filter(Boolean).slice(-100)
             : [];
@@ -182,10 +197,19 @@
                 .slice(-100)
             : [];
 
+        const readSeq = Number(saved?.lastReadSeq);
+
         state.unreadMessageIds = idSet;
         state.mentionUnreadMessageIds = new Set(mentionIds);
         state.unread = state.unreadMessageIds.size;
         state.mentionUnread = state.mentionUnreadMessageIds.size;
+        state.unreadStateUserId = savedUserId;
+        state.unreadStateHasReadSeq = Number.isFinite(readSeq) && readSeq >= 0;
+
+        if (state.unreadStateHasReadSeq) {
+            state.lastReadSeq = Math.max(0, Math.floor(readSeq));
+        }
+
         updateBadge();
     }
 
@@ -204,8 +228,16 @@
         state.mentionUnreadMessageIds = new Set(mentionIds);
         state.unread = ids.length;
         state.mentionUnread = mentionIds.length;
+        state.unreadStateHasReadSeq = true;
+        state.unreadStateUserId = Number(
+            state.me?.id ||
+            state.unreadStateUserId ||
+            0
+        );
 
         GM_setValue(UNREAD_STATE_KEY, {
+            userId: state.unreadStateUserId || null,
+            lastReadSeq: Math.max(0, Number(state.lastReadSeq || 0)),
             ids,
             mentionIds,
             updatedAt: Date.now(),
@@ -215,22 +247,53 @@
         updateBadge();
     }
 
-    function addSharedUnread(messageId, mentionsMe = false) {
+    function getSharedLastReadSeq() {
+        const saved = GM_getValue(UNREAD_STATE_KEY, null);
+        const savedUserId = Number(saved?.userId || 0);
+        const currentUserId = Number(state.me?.id || 0);
+
+        if (currentUserId && savedUserId && currentUserId !== savedUserId) {
+            return 0;
+        }
+
+        const seq = Number(saved?.lastReadSeq);
+        return Number.isFinite(seq) && seq >= 0 ? Math.floor(seq) : 0;
+    }
+
+    function addSharedUnread(messageId, mentionsMe = false, seq = 0) {
         const id = String(messageId || '');
+        const numericSeq = Math.max(0, Number(seq || 0));
         if (!id) return;
 
-        // Merge with the latest shared value immediately before writing. This keeps
-        // two active Torn tabs from overwriting each other's unread IDs.
         const saved = GM_getValue(UNREAD_STATE_KEY, null);
+        const savedUserId = Number(saved?.userId || 0);
+        const currentUserId = Number(state.me?.id || 0);
+
+        // If storage belongs to another Torn account, start a clean state for
+        // the currently authenticated account.
+        const sameUser =
+            !savedUserId ||
+            !currentUserId ||
+            savedUserId === currentUserId;
+
+        const sharedReadSeq = sameUser
+            ? Math.max(0, Number(saved?.lastReadSeq || 0))
+            : 0;
+
+        // Another active tab may already have displayed/read this message.
+        if (numericSeq && numericSeq <= sharedReadSeq) {
+            state.lastReadSeq = Math.max(state.lastReadSeq, sharedReadSeq);
+            return;
+        }
 
         const ids = new Set(
-            Array.isArray(saved?.ids)
+            sameUser && Array.isArray(saved?.ids)
                 ? saved.ids.map(String).filter(Boolean)
                 : []
         );
 
         const mentionIds = new Set(
-            Array.isArray(saved?.mentionIds)
+            sameUser && Array.isArray(saved?.mentionIds)
                 ? saved.mentionIds.map(String).filter(Boolean)
                 : []
         );
@@ -241,6 +304,7 @@
         const trimmedIds = [...ids].slice(-100);
         const trimmedSet = new Set(trimmedIds);
 
+        state.lastReadSeq = Math.max(state.lastReadSeq, sharedReadSeq);
         state.unreadMessageIds = trimmedSet;
         state.mentionUnreadMessageIds = new Set(
             [...mentionIds].filter(value => trimmedSet.has(value)).slice(-100)
@@ -249,23 +313,44 @@
         saveSharedUnread();
     }
 
-    function clearSharedUnread() {
+    function clearSharedUnread(readThroughSeq = state.lastCursor) {
+        const sharedReadSeq = getSharedLastReadSeq();
+        const targetSeq = Math.max(
+            sharedReadSeq,
+            Number(state.lastReadSeq || 0),
+            Number(readThroughSeq || 0)
+        );
+
+        state.lastReadSeq = targetSeq;
         state.unreadMessageIds.clear();
         state.mentionUnreadMessageIds.clear();
         state.unread = 0;
         state.mentionUnread = 0;
 
-        GM_setValue(UNREAD_STATE_KEY, {
-            ids: [],
-            mentionIds: [],
-            updatedAt: Date.now(),
-            updatedBy: TAB_ID,
-        });
+        saveSharedUnread();
+    }
 
-        updateBadge();
+    function releaseNotifyLeadership() {
+        const lease = GM_getValue(NOTIFY_LEADER_KEY, null);
+
+        if (lease?.tabId === TAB_ID) {
+            GM_setValue(NOTIFY_LEADER_KEY, {
+                tabId: '',
+                expiresAt: 0,
+            });
+        }
+
+        state.notifyLeader = false;
     }
 
     function refreshNotifyLeadership() {
+        // Only a fully authenticated/bootstrapped tab may own the background
+        // polling lease. A logged-out/stale tab must never block notifications.
+        if (!state.token || !state.initialized) {
+            releaseNotifyLeadership();
+            return false;
+        }
+
         const now = Date.now();
         const lease = GM_getValue(NOTIFY_LEADER_KEY, null);
 
@@ -291,8 +376,6 @@
     }
 
     function startNotifyLeadership() {
-        refreshNotifyLeadership();
-
         if (state.notifyHeartbeatTimer) {
             clearInterval(state.notifyHeartbeatTimer);
         }
@@ -313,6 +396,84 @@
             }
         }, NOTIFY_HEARTBEAT_MS);
     }
+
+    function sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function adoptSharedSession() {
+        const sharedToken = String(GM_getValue(TOKEN_KEY, '') || '');
+        const sharedRefresh = String(GM_getValue(REFRESH_TOKEN_KEY, '') || '');
+
+        if (sharedToken) state.token = sharedToken;
+        if (sharedRefresh) state.refreshToken = sharedRefresh;
+
+        return {
+            token: sharedToken,
+            refreshToken: sharedRefresh,
+        };
+    }
+
+    async function acquireRefreshLock(startingRefreshToken) {
+        const deadline = Date.now() + REFRESH_WAIT_MS;
+
+        while (Date.now() < deadline) {
+            const sharedRefresh = String(
+                GM_getValue(REFRESH_TOKEN_KEY, '') || ''
+            );
+
+            // Another tab already rotated the token while we were waiting.
+            if (
+                sharedRefresh &&
+                startingRefreshToken &&
+                sharedRefresh !== startingRefreshToken
+            ) {
+                adoptSharedSession();
+                return false;
+            }
+
+            const now = Date.now();
+            const lease = GM_getValue(REFRESH_LOCK_KEY, null);
+            const expired =
+                !lease ||
+                typeof lease !== 'object' ||
+                Number(lease.expiresAt || 0) <= now;
+
+            if (expired || lease?.tabId === TAB_ID) {
+                GM_setValue(REFRESH_LOCK_KEY, {
+                    tabId: TAB_ID,
+                    expiresAt: now + REFRESH_LOCK_MS,
+                });
+
+                // GM_setValue is not an atomic compare-and-swap. Re-read after a
+                // short yield so simultaneous tabs agree on a single owner.
+                await sleep(60);
+
+                const confirmed = GM_getValue(REFRESH_LOCK_KEY, null);
+                if (
+                    confirmed?.tabId === TAB_ID &&
+                    Number(confirmed?.expiresAt || 0) > Date.now()
+                ) {
+                    return true;
+                }
+            }
+
+            await sleep(150);
+        }
+
+        return false;
+    }
+
+    function releaseRefreshLock() {
+        const lease = GM_getValue(REFRESH_LOCK_KEY, null);
+        if (lease?.tabId === TAB_ID) {
+            GM_setValue(REFRESH_LOCK_KEY, {
+                tabId: '',
+                expiresAt: 0,
+            });
+        }
+    }
+
 
     function addStyles() {
         if (document.getElementById('almanac-alliance-chat-css')) return;
@@ -369,6 +530,7 @@
             #${PANEL_ID}.ac-minimized { height: 38px !important; resize: none; }
             #${PANEL_ID}.ac-minimized .ac-body,
             #${PANEL_ID}.ac-minimized .ac-composer,
+            #${PANEL_ID}.ac-minimized .ac-new-messages,
             #${PANEL_ID}.ac-minimized .ac-status { display: none !important; }
             #${PANEL_ID} .ac-header {
                 height: 38px;
@@ -445,10 +607,10 @@
                 background: var(--ac-scroll-thumb-hover);
             }
             #${PANEL_ID} .ac-msg { margin: 0 0 7px 0; word-break: break-word; line-height: 1.32; }
-            #${PANEL_ID} .ac-meta { display: flex; align-items: baseline; gap: 5px; margin-bottom: 1px; }
+            #${PANEL_ID} .ac-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px; margin-bottom: 1px; }
             #${PANEL_ID} .ac-name { color: var(--ac-name); font-weight: 700; text-decoration: none; cursor: pointer; }
             #${PANEL_ID} .ac-name:hover { text-decoration: underline; }
-            #${PANEL_ID} .ac-time { color: var(--ac-time); font-size: 9px; }
+            #${PANEL_ID} .ac-time { color: var(--ac-time); font-size: 9px; margin-left: auto; white-space: nowrap; }
             #${PANEL_ID} .ac-faction { color: var(--ac-faction); font-size: 9px; }
             #${PANEL_ID} .ac-text { color: var(--ac-message-text); white-space: pre-wrap; }
 
@@ -546,6 +708,21 @@
             }
             #${PANEL_ID} .ac-system { color: #a8b3be; font-style: italic; margin: 6px 0; }
             #${PANEL_ID} .ac-error { color: #e58d8d; }
+            #${PANEL_ID} .ac-new-messages {
+                display: none;
+                align-self: center;
+                margin: 4px auto 0;
+                padding: 4px 9px;
+                border: 1px solid var(--ac-border);
+                border-radius: 12px;
+                background: var(--ac-accent);
+                color: #fff;
+                font-size: 10px;
+                line-height: 1.2;
+                cursor: pointer;
+                flex: 0 0 auto;
+            }
+            #${PANEL_ID} .ac-new-messages.ac-show { display: block; }
             #${PANEL_ID} .ac-composer {
                 display: flex; align-items: flex-end; gap: 5px;
                 padding: 6px; background: var(--ac-composer-bg); border-top: 1px solid #111;
@@ -1084,7 +1261,7 @@
     function currentUserscriptVersion() {
         return String(
             globalThis.GM_info?.script?.version ||
-            '0.1.58'
+            '0.1.59'
         );
     }
 
@@ -1486,6 +1663,8 @@
 
         const status = el('div', 'ac-status', 'Not connected');
         const body = el('div', 'ac-body');
+        const newMessages = el('button', 'ac-new-messages', 'New messages ↓');
+        newMessages.type = 'button';
 
         const settings = el('div', 'ac-settings');
         const settingsTitle = el('div', 'ac-settings-title', 'Chat settings');
@@ -1603,9 +1782,9 @@
 
         login.append(loginTitle, loginInfo, actions, shortNote, privacy, loginError);
 
-        panel.append(header, status, body, composer, mentionMenu, emojiPicker, login, settings);
+        panel.append(header, status, body, newMessages, composer, mentionMenu, emojiPicker, login, settings);
         document.body.appendChild(panel);
-        ui = { panel, header, title, online, settingsButton, mobileSizeButton, min, close, status, body, textarea, mentionMenu, emojiButton, emojiPicker, send, login, input, loginButton, loginError, settings, themeSelect };
+        ui = { panel, header, title, online, settingsButton, mobileSizeButton, min, close, status, body, newMessages, textarea, mentionMenu, emojiButton, emojiPicker, send, login, input, loginButton, loginError, settings, themeSelect };
 
         applyTheme(state.theme, false);
 
@@ -1690,9 +1869,26 @@
         });
 
         document.addEventListener('click', (e) => {
-            if (!emojiPicker.classList.contains('ac-show')) return;
-            if (emojiPicker.contains(e.target) || e.target === emojiButton) return;
-            emojiPicker.classList.remove('ac-show');
+            if (
+                emojiPicker.classList.contains('ac-show') &&
+                !emojiPicker.contains(e.target) &&
+                e.target !== emojiButton
+            ) {
+                emojiPicker.classList.remove('ac-show');
+            }
+
+            if (
+                mentionMenu.classList.contains('ac-show') &&
+                !mentionMenu.contains(e.target) &&
+                e.target !== textarea
+            ) {
+                closeMentionMenu();
+            }
+        });
+
+        newMessages.addEventListener('click', () => {
+            scrollBottom();
+            clearSharedUnread(state.lastCursor);
         });
 
         send.addEventListener('click', sendMessage);
@@ -1743,6 +1939,17 @@
         body.addEventListener('scroll', () => {
             if (body.scrollTop <= 12) {
                 loadOlderHistory();
+            }
+
+            if (
+                (state.unread > 0 || state.lastReadSeq < state.lastCursor) &&
+                isNearBottom() &&
+                isPageActive() &&
+                panel.classList.contains('ac-visible') &&
+                !panel.classList.contains('ac-minimized')
+            ) {
+                newMessages.classList.remove('ac-show');
+                clearSharedUnread(state.lastCursor);
             }
         }, { passive: true });
         loginButton.addEventListener('click', loginWithKey);
@@ -2104,6 +2311,7 @@
                 headers,
                 data: options.body || undefined,
                 responseType: 'text',
+                timeout: Number(options.timeout || REQUEST_TIMEOUT_MS),
 
                 onload: (response) => {
                     let data = {};
@@ -2130,33 +2338,112 @@
     }
 
     async function refreshAccessToken() {
-        if (!state.refreshToken) {
-            throw new Error('No refresh session');
-        }
-
         if (state.refreshInFlight) {
             return state.refreshInFlight;
         }
 
         state.refreshInFlight = (async () => {
-            const result = await apiRaw('/api/session/refresh', {
-                method: 'POST',
-                skipAuth: true,
-                body: JSON.stringify({ refresh_token: state.refreshToken })
-            });
+            // Always prefer the latest shared session values. Another Torn tab may
+            // already have rotated the refresh token.
+            adoptSharedSession();
 
-            if (!result.token || !result.refresh_token) {
-                throw new Error('Invalid refresh response');
+            if (!state.refreshToken) {
+                throw new Error('No refresh session');
             }
 
-            state.token = result.token;
-            state.refreshToken = result.refresh_token;
+            const startingRefreshToken = state.refreshToken;
+            const acquired = await acquireRefreshLock(startingRefreshToken);
 
-            GM_setValue(TOKEN_KEY, state.token);
-            GM_setValue(REFRESH_TOKEN_KEY, state.refreshToken);
+            if (!acquired) {
+                const shared = adoptSharedSession();
 
-            if (result.user) state.me = result.user;
-            return result;
+                if (
+                    shared.token &&
+                    shared.refreshToken &&
+                    shared.refreshToken !== startingRefreshToken
+                ) {
+                    return {
+                        token: shared.token,
+                        refresh_token: shared.refreshToken,
+                        shared: true,
+                    };
+                }
+
+                throw new Error('Timed out waiting for another chat tab to refresh the session');
+            }
+
+            try {
+                // The lock may have been obtained just after another tab completed
+                // a refresh. Re-check storage before using the old token.
+                const currentSharedRefresh = String(
+                    GM_getValue(REFRESH_TOKEN_KEY, '') || ''
+                );
+
+                if (
+                    currentSharedRefresh &&
+                    currentSharedRefresh !== startingRefreshToken
+                ) {
+                    const shared = adoptSharedSession();
+                    return {
+                        token: shared.token,
+                        refresh_token: shared.refreshToken,
+                        shared: true,
+                    };
+                }
+
+                let result;
+
+                try {
+                    result = await apiRaw('/api/session/refresh', {
+                        method: 'POST',
+                        skipAuth: true,
+                        body: JSON.stringify({
+                            refresh_token: startingRefreshToken
+                        })
+                    });
+                } catch (err) {
+                    // If another tab won a very tight race and already rotated the
+                    // token, use its newly-published session instead of logging out.
+                    const newerRefresh = String(
+                        GM_getValue(REFRESH_TOKEN_KEY, '') || ''
+                    );
+                    const newerToken = String(
+                        GM_getValue(TOKEN_KEY, '') || ''
+                    );
+
+                    if (
+                        err.status === 401 &&
+                        newerRefresh &&
+                        newerToken &&
+                        newerRefresh !== startingRefreshToken
+                    ) {
+                        state.token = newerToken;
+                        state.refreshToken = newerRefresh;
+                        return {
+                            token: newerToken,
+                            refresh_token: newerRefresh,
+                            shared: true,
+                        };
+                    }
+
+                    throw err;
+                }
+
+                if (!result.token || !result.refresh_token) {
+                    throw new Error('Invalid refresh response');
+                }
+
+                state.token = result.token;
+                state.refreshToken = result.refresh_token;
+
+                GM_setValue(TOKEN_KEY, state.token);
+                GM_setValue(REFRESH_TOKEN_KEY, state.refreshToken);
+
+                if (result.user) state.me = result.user;
+                return result;
+            } finally {
+                releaseRefreshLock();
+            }
         })();
 
         try {
@@ -2165,6 +2452,7 @@
             state.refreshInFlight = null;
         }
     }
+
 
     async function api(path, options = {}) {
         try {
@@ -2179,16 +2467,37 @@
 
             if (!canRefresh) throw err;
 
+            const refreshBeforeAttempt = state.refreshToken;
+
             try {
                 await refreshAccessToken();
-            } catch (_) {
-                logoutLocal();
-                throw err;
+            } catch (refreshErr) {
+                const sharedToken = String(GM_getValue(TOKEN_KEY, '') || '');
+                const sharedRefresh = String(GM_getValue(REFRESH_TOKEN_KEY, '') || '');
+
+                // A sibling tab may have completed the rotation between our failed
+                // request and this catch block. Reuse that session before deciding
+                // the device session is genuinely dead.
+                if (
+                    sharedToken &&
+                    sharedRefresh &&
+                    sharedRefresh !== refreshBeforeAttempt
+                ) {
+                    state.token = sharedToken;
+                    state.refreshToken = sharedRefresh;
+                    return apiRaw(path, { ...options, skipRefresh: true });
+                }
+
+                if (refreshErr.status === 401 || refreshErr.status === 403) {
+                    logoutLocal();
+                }
+                throw refreshErr;
             }
 
             return apiRaw(path, { ...options, skipRefresh: true });
         }
     }
+
 
     async function loginWithKey() {
         if (!canQueryTornRelatedApi()) {
@@ -2236,8 +2545,12 @@
             if (!state.token && state.refreshToken) {
                 try {
                     await refreshAccessToken();
-                } catch (_) {
-                    logoutLocal();
+                } catch (err) {
+                    if (err.status === 401 || err.status === 403) {
+                        logoutLocal();
+                    } else {
+                        throw err;
+                    }
                 }
             }
 
@@ -2257,6 +2570,7 @@
 
                 await loadBootstrap(renderHistory);
                 state.initialized = true;
+                refreshNotifyLeadership();
                 startPolling();
             } catch (err) {
                 state.initialized = false;
@@ -2297,6 +2611,9 @@
     }
 
     function logoutLocal() {
+        const oldToken = state.token;
+        const oldRefresh = state.refreshToken;
+
         state.token = '';
         state.refreshToken = '';
         state.refreshInFlight = null;
@@ -2313,8 +2630,22 @@
         state.mentionSuggestions = [];
         state.mentionSelection = 0;
         state.seenMessageIds.clear();
-        GM_deleteValue(TOKEN_KEY);
-        GM_deleteValue(REFRESH_TOKEN_KEY);
+
+        // Only remove the shared values if they are still the exact values this tab
+        // was using. A stale tab must never delete a newer token published by
+        // another tab after refresh rotation.
+        if (String(GM_getValue(TOKEN_KEY, '') || '') === String(oldToken || '')) {
+            GM_deleteValue(TOKEN_KEY);
+        }
+        if (
+            String(GM_getValue(REFRESH_TOKEN_KEY, '') || '') ===
+            String(oldRefresh || '')
+        ) {
+            GM_deleteValue(REFRESH_TOKEN_KEY);
+        }
+
+        releaseNotifyLeadership();
+        releaseRefreshLock();
 
         if (state.pollTimer) {
             clearTimeout(state.pollTimer);
@@ -2322,9 +2653,10 @@
         }
 
         state.pollInFlight = false;
-        ui.send.disabled = true;
+        if (ui.send) ui.send.disabled = true;
         if (ui.online) renderConnectionState('offline');
     }
+
 
     async function loadBootstrap(renderHistory) {
         const data = await api('/api/bootstrap');
@@ -2339,7 +2671,53 @@
             state.factionNames[String(data.user.faction_id)] = data.user.faction_name;
         }
         state.maxMessageChars = data.max_message_chars || 1000;
-        state.lastCursor = Number(data.cursor || 0);
+
+        const latestCursor = Number(data.cursor || 0);
+        const currentUserId = Number(data.user?.id || 0);
+        const savedUnread = GM_getValue(UNREAD_STATE_KEY, null);
+        const savedUserId = Number(savedUnread?.userId || 0);
+        const savedReadSeq = Number(savedUnread?.lastReadSeq);
+        const sameStoredUser =
+            !savedUserId ||
+            !currentUserId ||
+            savedUserId === currentUserId;
+
+        if (!sameStoredUser) {
+            // Shared userscript storage can survive switching Torn accounts.
+            // Never carry one account's unread/read watermark into another.
+            state.unreadMessageIds.clear();
+            state.mentionUnreadMessageIds.clear();
+            state.unread = 0;
+            state.mentionUnread = 0;
+            state.lastReadSeq = latestCursor;
+            state.unreadStateHasReadSeq = true;
+            state.unreadStateUserId = currentUserId;
+            saveSharedUnread();
+        } else if (!(Number.isFinite(savedReadSeq) && savedReadSeq >= 0)) {
+            // v0.1.58 and older had no read watermark. Start from the current
+            // server cursor so upgrading does not mark the entire room history unread.
+            state.lastReadSeq = latestCursor;
+            state.unreadStateHasReadSeq = true;
+            state.unreadStateUserId = currentUserId;
+            saveSharedUnread();
+        } else {
+            state.lastReadSeq = Math.max(0, Math.floor(savedReadSeq));
+            state.unreadStateHasReadSeq = true;
+            state.unreadStateUserId = currentUserId;
+        }
+
+        const activelyViewing =
+            renderHistory &&
+            isPageActive() &&
+            ui.panel?.classList.contains('ac-visible') &&
+            !ui.panel?.classList.contains('ac-minimized');
+
+        // Closed/background startup begins polling from the last message the user
+        // actually read, not simply from "latest". This recovers messages that
+        // arrived while the browser/userscript was completely offline.
+        state.lastCursor = activelyViewing
+            ? latestCursor
+            : Math.min(latestCursor, Math.max(0, state.lastReadSeq));
 
         ui.title.textContent = state.roomName;
         ui.textarea.maxLength = state.maxMessageChars;
@@ -2360,15 +2738,32 @@
 
             for (const msg of initialHistory) {
                 rememberMessage(msg);
-                await renderEncryptedMessage(msg);
+                const renderInfo = await renderEncryptedMessage(msg);
+
+                if (
+                    !activelyViewing &&
+                    Number(msg.seq || 0) > state.lastReadSeq &&
+                    Number(msg.sender_id) !== Number(state.me?.id)
+                ) {
+                    addSharedUnread(
+                        msg.message_id,
+                        Boolean(renderInfo?.mentionsMe),
+                        Number(msg.seq || 0)
+                    );
+                }
             }
             scrollBottom();
+
+            if (activelyViewing) {
+                clearSharedUnread(latestCursor);
+            }
         }
 
         ui.send.disabled = false;
         renderConnectionState('Connecting');
         setStatus(`${state.me.name} · ${state.me.faction_name || state.factionNames[String(state.me.faction_id)] || `Faction ${state.me.faction_id}`}`);
     }
+
 
     function isPageActive() {
         return !document.hidden && document.hasFocus();
@@ -2519,9 +2914,11 @@
             };
 
             for (const msg of data.messages || []) {
+                const msgSeq = Number(msg.seq || 0);
+
                 state.lastCursor = Math.max(
                     state.lastCursor,
-                    Number(msg.seq || 0)
+                    msgSeq
                 );
 
                 if (!rememberMessage(msg)) continue;
@@ -2533,16 +2930,24 @@
                 const pageInactive = !isPageActive();
                 const fromOtherUser = Number(msg.sender_id) !== Number(state.me?.id);
 
+                // "Open" does not automatically mean "read": if the user has
+                // scrolled up, preserve the unread badge and show the in-chat
+                // new-message button instead of yanking them to the bottom.
+                const wasActivelyViewingLive =
+                    !panelClosed &&
+                    !minimized &&
+                    !pageInactive &&
+                    Boolean(renderInfo?.wasNearBottom);
+
                 if (
                     fromOtherUser &&
-                    (panelClosed || minimized || pageInactive) &&
+                    !wasActivelyViewingLive &&
                     (isPageActive() || state.notifyLeader)
                 ) {
-                    // Shared ID storage deduplicates the same message across Torn tabs.
-                    // Mention IDs are a subset of ordinary unread IDs.
                     addSharedUnread(
                         msg.message_id,
-                        Boolean(renderInfo?.mentionsMe)
+                        Boolean(renderInfo?.mentionsMe),
+                        msgSeq
                     );
                 }
             }
@@ -2551,6 +2956,16 @@
                 state.lastCursor,
                 Number(data.cursor || 0)
             );
+
+            const activelyAtLiveEdge =
+                isPageActive() &&
+                ui.panel.classList.contains('ac-visible') &&
+                !ui.panel.classList.contains('ac-minimized') &&
+                isNearBottom();
+
+            if (activelyAtLiveEdge) {
+                clearSharedUnread(state.lastCursor);
+            }
 
             state.pollFailures = 0;
             renderConnectionState('Connected');
@@ -2576,13 +2991,25 @@
         }
     }
 
+
     async function sendMessage() {
         const originalText = ui.textarea.value;
+        const visibleText = originalText.trim();
+
+        if (!visibleText || !state.cryptoKey || !state.token) return;
+
+        if (visibleText.length > state.maxMessageChars) {
+            addSystem(
+                `Message is too long (${visibleText.length}/${state.maxMessageChars} characters).`,
+                true
+            );
+            return;
+        }
+
         const emojiText = replaceEmojiShortcodes(originalText);
         const text = encodeMentions(emojiText).trim();
 
-        if (!text || !state.cryptoKey || !state.token) return;
-        if (text.length > state.maxMessageChars) return;
+        if (!text) return;
 
         ui.textarea.value = '';
         closeMentionMenu();
@@ -2606,15 +3033,13 @@
                 return;
             }
 
-            state.lastCursor = Math.max(
-                state.lastCursor,
-                Number(result.cursor || 0)
-            );
-
-            if (result.message && rememberMessage(result.message)) {
-                await renderEncryptedMessage(result.message);
-            }
-
+            // IMPORTANT: do not advance lastCursor from the POST response.
+            // Another user's message may have received a lower sequence between
+            // our previous poll and this send. The immediate poll below retrieves
+            // every missing sequence; rememberMessage() suppresses our own duplicate.
+            // Let the immediate poll render the accepted message in sequence order.
+            // This avoids placing our own seq=102 above an unseen seq=101 message
+            // that was sent by somebody else just before our POST completed.
             schedulePoll(0);
         } catch (err) {
             if (err.status === 409) {
@@ -2635,6 +3060,7 @@
             ui.send.disabled = !state.token || !state.cryptoKey;
         }
     }
+
 
     async function importRoomKey(keyB64) {
         const raw = fromB64(keyB64);
@@ -2676,7 +3102,11 @@
         try { text = await decryptMessage(msg); }
         catch (_) { text = '[Unable to decrypt this message]'; }
 
+        const wasNearBottom = prepend ? false : isNearBottom();
+
         const wrap = el('div', 'ac-msg');
+        wrap.dataset.messageId = String(msg.message_id || '');
+        wrap.dataset.seq = String(msg.seq || '');
         const meta = el('div', 'ac-meta');
 
         // Avoid Torn/BSP player-list patterns: no ".user.name", no visible
@@ -2712,6 +3142,7 @@
 
         const faction = el('span', 'ac-faction', `[${factionName}]`);
         const stamp = el('span', 'ac-time', formatTime(msg.created_at));
+        stamp.title = formatLocalTime(msg.created_at);
         const body = el('div', 'ac-text');
 
         // Still no innerHTML: plaintext pieces are Text nodes and recognized
@@ -2726,11 +3157,21 @@
             ui.body.insertBefore(wrap, ui.body.firstChild);
         } else {
             ui.body.appendChild(wrap);
-            scrollBottom();
+            pruneRenderedMessages();
+
+            if (wasNearBottom) {
+                scrollBottom();
+            } else {
+                ui.newMessages?.classList.add('ac-show');
+            }
         }
 
-        return { mentionsMe: parsed.mentionsMe };
+        return {
+            mentionsMe: parsed.mentionsMe,
+            wasNearBottom,
+        };
     }
+
 
     function addSystem(text, isError = false) {
         const node = el('div', `ac-system${isError ? ' ac-error' : ''}`, text);
@@ -2744,16 +3185,79 @@
         ui.status.classList.toggle('ac-error', !!isError);
     }
 
+    function parseServerTimestamp(value) {
+        let text = String(value || '').trim();
+        if (!text) return null;
+
+        // Older MongoDB reads could serialize a UTC datetime without an explicit
+        // offset. Treat those legacy values as UTC instead of the viewer's local
+        // timezone, which is what caused "wacky" cross-timezone timestamps.
+        if (
+            /^\d{4}-\d{2}-\d{2}T/.test(text) &&
+            !/(?:Z|[+-]\d{2}:\d{2})$/i.test(text)
+        ) {
+            text += 'Z';
+        }
+
+        const d = new Date(text);
+        return Number.isNaN(d.getTime()) ? null : d;
+    }
+
     function formatTime(value) {
-        const d = new Date(value);
-        if (Number.isNaN(d.getTime())) return '';
-        return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const d = parseServerTimestamp(value);
+        if (!d) return '';
+
+        const parts = new Intl.DateTimeFormat('en-GB', {
+            timeZone: 'UTC',
+            day: '2-digit',
+            month: 'short',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            hourCycle: 'h23',
+        }).formatToParts(d);
+
+        const pick = type => parts.find(part => part.type === type)?.value || '';
+        return `${pick('day')} ${pick('month')} ${pick('year')} · ${pick('hour')}:${pick('minute')} TCT`;
+    }
+
+    function formatLocalTime(value) {
+        const d = parseServerTimestamp(value);
+        if (!d) return '';
+
+        const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'local time';
+        return `Your local time: ${d.toLocaleString([], {
+            year: 'numeric',
+            month: 'short',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+        })} (${zone})`;
+    }
+
+    function isNearBottom() {
+        if (!ui.body) return true;
+        return ui.body.scrollHeight - ui.body.scrollTop - ui.body.clientHeight <= 40;
+    }
+
+    function pruneRenderedMessages() {
+        if (!ui.body) return;
+
+        const nodes = ui.body.querySelectorAll('.ac-msg');
+        const excess = nodes.length - MAX_RENDERED_MESSAGES;
+        if (excess <= 0) return;
+
+        for (let i = 0; i < excess; i++) {
+            nodes[i]?.remove();
+        }
     }
 
     function scrollBottom() {
         if (!ui.body) return;
         ui.body.scrollTop = ui.body.scrollHeight;
+        ui.newMessages?.classList.remove('ac-show');
     }
+
 
     function toB64(bytes) {
         let binary = '';
@@ -2820,6 +3324,21 @@
             renderConnectionState();
         });
 
+        GM_addValueChangeListener(TOKEN_KEY, (_name, _oldValue, newValue, remote) => {
+            if (!remote) return;
+            state.token = String(newValue || '');
+
+            if (!state.token) {
+                state.initialized = false;
+                releaseNotifyLeadership();
+            }
+        });
+
+        GM_addValueChangeListener(REFRESH_TOKEN_KEY, (_name, _oldValue, newValue, remote) => {
+            if (!remote) return;
+            state.refreshToken = String(newValue || '');
+        });
+
         GM_addValueChangeListener(UNREAD_STATE_KEY, (_name, _oldValue, newValue, remote) => {
             if (!remote) return;
             applySharedUnreadValue(newValue);
@@ -2877,36 +3396,6 @@
         }, 250);
     });
     observer.observe(document.documentElement, { childList: true, subtree: true });
-
-    window.addEventListener('resize', () => {
-        if (isMobileLayout()) {
-            updateMobileViewport();
-            return;
-        }
-        if (!ui.panel || ui.panel.dataset.dragged !== '1') return;
-
-        const r = ui.panel.getBoundingClientRect();
-
-        const width = Math.max(260, Math.min(r.width, window.innerWidth - 16));
-        const height = Math.max(220, Math.min(r.height, window.innerHeight - 16));
-
-        ui.panel.style.width = `${width}px`;
-        if (!ui.panel.classList.contains('ac-minimized')) {
-            ui.panel.style.height = `${height}px`;
-        }
-
-        const pos = clampPanelPosition(ui.panel, r.left, r.top);
-
-        ui.panel.style.left = `${pos.left}px`;
-        ui.panel.style.top = `${pos.top}px`;
-
-        saveUiState({
-            left: Math.round(pos.left),
-            top: Math.round(pos.top),
-            width: Math.round(width),
-            height: Math.round(height)
-        });
-    });
 
     if (window.visualViewport) {
         window.visualViewport.addEventListener('resize', () => {
@@ -3001,13 +3490,8 @@
             state.notifyHeartbeatTimer = null;
         }
 
-        const lease = GM_getValue(NOTIFY_LEADER_KEY, null);
-        if (lease?.tabId === TAB_ID) {
-            GM_setValue(NOTIFY_LEADER_KEY, {
-                tabId: '',
-                expiresAt: 0,
-            });
-        }
+        releaseNotifyLeadership();
+        if (!state.refreshInFlight) releaseRefreshLock();
     });
 
     boot();
