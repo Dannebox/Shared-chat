@@ -3,7 +3,7 @@
 // @namespace    almanac.shared.chat
 // @updateURL   https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
 // @downloadURL https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
-// @version      0.1.61
+// @version      0.1.63
 // @description  Secure shared chat for approved Torn factions using CSP-safe HTTP polling; does not scrape Torn pages.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -160,6 +160,10 @@
         mentionSelection: 0,
         customEmojis: new Map(),
         customEmojiReadyPromise: null,
+        staffRoles: {},
+        moderationMembers: [],
+        moderationAudit: [],
+        deletedMessageIds: new Set(),
         pollTimer: null,
         pollInFlight: false,
         pollFailures: 0,
@@ -596,21 +600,29 @@
                 scrollbar-color: var(--ac-scroll-thumb) var(--ac-scroll-track);
             }
 
-            #${PANEL_ID} .ac-body::-webkit-scrollbar {
+            #${PANEL_ID} .ac-body::-webkit-scrollbar,
+            #${PANEL_ID} .ac-emoji-picker::-webkit-scrollbar,
+            #${PANEL_ID} .ac-manage-scroll::-webkit-scrollbar {
                 width: 7px;
             }
 
-            #${PANEL_ID} .ac-body::-webkit-scrollbar-track {
+            #${PANEL_ID} .ac-body::-webkit-scrollbar-track,
+            #${PANEL_ID} .ac-emoji-picker::-webkit-scrollbar-track,
+            #${PANEL_ID} .ac-manage-scroll::-webkit-scrollbar-track {
                 background: var(--ac-scroll-track);
             }
 
-            #${PANEL_ID} .ac-body::-webkit-scrollbar-thumb {
+            #${PANEL_ID} .ac-body::-webkit-scrollbar-thumb,
+            #${PANEL_ID} .ac-emoji-picker::-webkit-scrollbar-thumb,
+            #${PANEL_ID} .ac-manage-scroll::-webkit-scrollbar-thumb {
                 background: var(--ac-scroll-thumb);
                 border-radius: 6px;
                 border: 1px solid var(--ac-scroll-track);
             }
 
-            #${PANEL_ID} .ac-body::-webkit-scrollbar-thumb:hover {
+            #${PANEL_ID} .ac-body::-webkit-scrollbar-thumb:hover,
+            #${PANEL_ID} .ac-emoji-picker::-webkit-scrollbar-thumb:hover,
+            #${PANEL_ID} .ac-manage-scroll::-webkit-scrollbar-thumb:hover {
                 background: var(--ac-scroll-thumb-hover);
             }
             #${PANEL_ID} .ac-msg { margin: 0 0 7px 0; word-break: break-word; line-height: 1.32; }
@@ -620,6 +632,22 @@
             #${PANEL_ID} .ac-time { color: var(--ac-time); font-size: 9px; margin-left: auto; white-space: nowrap; }
             #${PANEL_ID} .ac-faction { color: var(--ac-faction); font-size: 9px; }
             #${PANEL_ID} .ac-text { color: var(--ac-message-text); white-space: pre-wrap; }
+            #${PANEL_ID} .ac-deleted .ac-text { color: var(--ac-muted); font-style: italic; }
+            #${PANEL_ID} .ac-mod-delete {
+                display: none;
+                width: 18px !important;
+                height: 18px !important;
+                padding: 0 !important;
+                border: 0 !important;
+                background: transparent !important;
+                color: #b9c0c7 !important;
+                font-size: 14px !important;
+                line-height: 16px !important;
+                cursor: pointer;
+                margin-left: 1px;
+            }
+            #${PANEL_ID} .ac-msg:hover .ac-mod-delete { display: inline-block; }
+            #${PANEL_ID} .ac-mod-delete:hover { color: #ff8d8d !important; }
 
             #${PANEL_ID} .ac-link {
                 color: var(--ac-name);
@@ -812,6 +840,8 @@
             }
 
             #${PANEL_ID} .ac-emoji-picker {
+                scrollbar-width: thin;
+                scrollbar-color: var(--ac-scroll-thumb) var(--ac-scroll-track);
                 position: absolute;
                 right: 70px;
                 bottom: 49px;
@@ -862,6 +892,78 @@
             }
 
             #${PANEL_ID} .ac-send:disabled { opacity: .45; cursor: default; }
+            #${PANEL_ID} .ac-manage-button {
+                display: none;
+                width: auto !important;
+                min-width: 0;
+                padding: 0 4px !important;
+                font-size: 10px !important;
+                font-weight: 700;
+                white-space: nowrap;
+            }
+            #${PANEL_ID} .ac-manage-button.ac-show { display: inline-block; }
+            #${PANEL_ID} .ac-manage {
+                position: absolute; inset: 38px 0 0 0; z-index: 12;
+                display: none; flex-direction: column;
+                box-sizing: border-box; background: var(--ac-panel-bg); color: var(--ac-text);
+            }
+            #${PANEL_ID} .ac-manage.ac-show { display: flex; }
+            #${PANEL_ID} .ac-manage-head {
+                min-height: 35px; display: flex; align-items: center; gap: 7px;
+                padding: 6px 8px; box-sizing: border-box;
+                border-bottom: 1px solid var(--ac-border); background: var(--ac-status-bg);
+            }
+            #${PANEL_ID} .ac-manage-title { flex: 1; font-weight: 700; color: #fff; }
+            #${PANEL_ID} .ac-manage-role { color: var(--ac-online); font-size: 10px; text-transform: capitalize; }
+            #${PANEL_ID} .ac-manage-close,
+            #${PANEL_ID} .ac-manage-refresh {
+                border: 1px solid var(--ac-border); border-radius: 3px;
+                background: var(--ac-input-bg); color: var(--ac-text); cursor: pointer;
+                padding: 4px 7px; font: inherit;
+            }
+            #${PANEL_ID} .ac-manage-controls {
+                display: flex; gap: 5px; padding: 7px; border-bottom: 1px solid var(--ac-border);
+            }
+            #${PANEL_ID} .ac-manage-search {
+                flex: 1; min-width: 0; padding: 6px; box-sizing: border-box;
+                border: 1px solid var(--ac-border); border-radius: 3px;
+                background: var(--ac-input-bg); color: var(--ac-text); outline: none;
+            }
+            #${PANEL_ID} .ac-manage-status { min-height: 17px; padding: 4px 8px; color: var(--ac-muted); font-size: 10px; }
+            #${PANEL_ID} .ac-manage-status.ac-error { color: #e58d8d; }
+            #${PANEL_ID} .ac-manage-scroll {
+                flex: 1;
+                overflow-y: auto;
+                padding: 0 7px 10px;
+                scrollbar-width: thin;
+                scrollbar-color: var(--ac-scroll-thumb) var(--ac-scroll-track);
+            }
+            #${PANEL_ID} .ac-manage-section-title {
+                margin: 8px 0 5px; color: #fff; font-size: 11px; font-weight: 700;
+            }
+            #${PANEL_ID} .ac-manage-member {
+                padding: 7px 0; border-bottom: 1px solid rgba(255,255,255,.07);
+            }
+            #${PANEL_ID} .ac-manage-member-top { display: flex; align-items: center; gap: 5px; }
+            #${PANEL_ID} .ac-manage-member-name { flex: 1; min-width: 0; font-weight: 700; color: var(--ac-name); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+            #${PANEL_ID} .ac-role-badge {
+                padding: 1px 5px; border: 1px solid var(--ac-border); border-radius: 8px;
+                color: var(--ac-online); font-size: 9px; text-transform: capitalize;
+            }
+            #${PANEL_ID} .ac-member-state { color: #e7b66a; font-size: 9px; }
+            #${PANEL_ID} .ac-manage-member-sub { color: var(--ac-muted); font-size: 9px; margin-top: 2px; }
+            #${PANEL_ID} .ac-manage-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+            #${PANEL_ID} .ac-manage-actions button,
+            #${PANEL_ID} .ac-manage-actions select {
+                min-height: 25px; border: 1px solid var(--ac-border); border-radius: 3px;
+                background: var(--ac-input-bg); color: var(--ac-text); font: inherit; font-size: 10px;
+            }
+            #${PANEL_ID} .ac-manage-actions button { cursor: pointer; padding: 3px 6px; }
+            #${PANEL_ID} .ac-manage-actions button.ac-danger { color: #ff9b9b; }
+            #${PANEL_ID} .ac-audit-entry {
+                padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,.06); color: var(--ac-text); font-size: 10px; line-height: 1.35;
+            }
+            #${PANEL_ID} .ac-audit-time { color: var(--ac-time); margin-right: 5px; }
             #${PANEL_ID} .ac-login {
                 position: absolute; inset: 38px 0 0 0; z-index: 3;
                 display: none; flex-direction: column; padding: 14px;
@@ -1940,6 +2042,296 @@
         textarea.dispatchEvent(new Event('input', { bubbles: true }));
     }
 
+    function currentRole() {
+        const role = String(state.me?.role || 'member').toLowerCase();
+        return ['owner', 'admin', 'moderator'].includes(role) ? role : 'member';
+    }
+
+    function isStaffRole(role = currentRole()) {
+        return ['owner', 'admin', 'moderator'].includes(String(role || '').toLowerCase());
+    }
+
+    function targetRole(userId) {
+        if (Number(userId) === Number(state.me?.id)) return currentRole();
+        return String(state.staffRoles[String(userId)] || 'member').toLowerCase();
+    }
+
+    function canModerateTarget(userId) {
+        const actor = currentRole();
+        if (!isStaffRole(actor)) return false;
+        if (Number(userId) === Number(state.me?.id)) return true;
+        const target = targetRole(userId);
+        if (actor === 'owner') return target !== 'owner';
+        if (actor === 'admin') return target !== 'owner';
+        if (actor === 'moderator') return target !== 'owner' && target !== 'admin';
+        return false;
+    }
+
+    function refreshManageVisibility() {
+        if (!ui.manageButton) return;
+        const visible = isStaffRole();
+        ui.manageButton.classList.toggle('ac-show', visible);
+        if (!visible) ui.manage?.classList.remove('ac-show');
+    }
+
+    function setManageStatus(text = '', isError = false) {
+        if (!ui.manageStatus) return;
+        ui.manageStatus.textContent = text;
+        ui.manageStatus.classList.toggle('ac-error', !!isError);
+    }
+
+    function actionLabel(action) {
+        const names = {
+            role_changed: 'changed role',
+            muted: 'muted',
+            unmuted: 'unmuted',
+            banned: 'banned',
+            unbanned: 'unbanned',
+            message_deleted: 'deleted a message from',
+        };
+        return names[String(action || '')] || String(action || '').replace(/_/g, ' ');
+    }
+
+    function renderModerationAudit() {
+        if (!ui.auditList) return;
+        ui.auditList.textContent = '';
+        if (!state.moderationAudit.length) {
+            ui.auditList.appendChild(el('div', 'ac-audit-entry', 'No moderation actions yet.'));
+            return;
+        }
+
+        for (const item of state.moderationAudit) {
+            const row = el('div', 'ac-audit-entry');
+            const time = el('span', 'ac-audit-time', formatTime(item.created_at));
+            const actor = String(item.actor_name || `User ${item.actor_id || '?'}`);
+            const target = String(item.target_name || (item.target_user_id ? `User ${item.target_user_id}` : ''));
+            let detail = `${actor} ${actionLabel(item.action)}`;
+            if (target) detail += ` ${target}`;
+            if (item.action === 'role_changed' && item.details?.to) {
+                detail += ` → ${item.details.to}`;
+            }
+            if (item.action === 'muted') {
+                if (item.details?.permanent) detail += ' permanently';
+                else if (item.details?.duration_minutes) detail += ` for ${item.details.duration_minutes}m`;
+            }
+            row.append(time, document.createTextNode(detail));
+            ui.auditList.appendChild(row);
+        }
+    }
+
+    async function loadModerationAudit() {
+        if (!isStaffRole()) return;
+        try {
+            const data = await api('/api/moderation/audit?limit=50');
+            state.moderationAudit = Array.isArray(data.actions) ? data.actions : [];
+            renderModerationAudit();
+        } catch (err) {
+            setManageStatus(`Could not load audit log: ${err.message}`, true);
+        }
+    }
+
+    async function runModerationAction(path, payload, successText = '') {
+        setManageStatus('Saving...');
+        try {
+            await api(path, {
+                method: 'POST',
+                body: JSON.stringify(payload || {}),
+            });
+            if (successText) setManageStatus(successText);
+            await loadModerationManage(false);
+            await loadModerationAudit();
+            schedulePoll(0);
+            return true;
+        } catch (err) {
+            setManageStatus(err.message || 'Moderation action failed', true);
+            return false;
+        }
+    }
+
+    function renderModerationMembers() {
+        if (!ui.manageMembers) return;
+        ui.manageMembers.textContent = '';
+        const query = String(ui.manageSearch?.value || '').trim().toLowerCase();
+        const actorRole = currentRole();
+        const members = state.moderationMembers.filter(member => {
+            if (!query) return true;
+            return `${member.name} ${member.id} ${member.faction_name} ${member.role}`.toLowerCase().includes(query);
+        });
+
+        if (!members.length) {
+            ui.manageMembers.appendChild(el('div', 'ac-audit-entry', 'No matching members.'));
+            return;
+        }
+
+        for (const member of members) {
+            const row = el('div', 'ac-manage-member');
+            const top = el('div', 'ac-manage-member-top');
+            const name = el('div', 'ac-manage-member-name', `${member.name} [${member.id}]`);
+            const role = el('span', 'ac-role-badge', member.role || 'member');
+            top.append(name, role);
+
+            if (member.banned) top.appendChild(el('span', 'ac-member-state', 'BANNED'));
+            else if (member.muted) top.appendChild(el('span', 'ac-member-state', 'MUTED'));
+
+            const sub = el('div', 'ac-manage-member-sub', member.faction_name || `Faction ${member.faction_id}`);
+            const actions = el('div', 'ac-manage-actions');
+            const isSelf = Number(member.id) === Number(state.me?.id);
+            const canTarget = !isSelf && canModerateTarget(member.id);
+
+            if (actorRole === 'owner' && member.role !== 'owner') {
+                const roleSelect = document.createElement('select');
+                for (const value of ['member', 'moderator', 'admin']) {
+                    const option = document.createElement('option');
+                    option.value = value;
+                    option.textContent = value[0].toUpperCase() + value.slice(1);
+                    roleSelect.appendChild(option);
+                }
+                roleSelect.value = ['member', 'moderator', 'admin'].includes(member.role) ? member.role : 'member';
+                const saveRole = el('button', '', 'Set role');
+                saveRole.type = 'button';
+                saveRole.addEventListener('click', () => runModerationAction(
+                    '/api/moderation/role',
+                    { target_user_id: member.id, role: roleSelect.value },
+                    `${member.name}'s role updated.`
+                ));
+                actions.append(roleSelect, saveRole);
+            }
+
+            if (canTarget) {
+                if (member.muted) {
+                    const unmute = el('button', '', 'Unmute');
+                    unmute.type = 'button';
+                    unmute.addEventListener('click', () => runModerationAction(
+                        '/api/moderation/unmute',
+                        { target_user_id: member.id, reason: '' },
+                        `${member.name} unmuted.`
+                    ));
+                    actions.appendChild(unmute);
+                } else {
+                    const duration = document.createElement('select');
+                    for (const [value, label] of [
+                        ['5', '5 min'], ['30', '30 min'], ['60', '1 hour'],
+                        ['360', '6 hours'], ['1440', '24 hours'], ['permanent', 'Permanent']
+                    ]) {
+                        const option = document.createElement('option');
+                        option.value = value;
+                        option.textContent = label;
+                        duration.appendChild(option);
+                    }
+                    duration.value = '30';
+                    const mute = el('button', '', 'Mute');
+                    mute.type = 'button';
+                    mute.addEventListener('click', () => {
+                        const durationMinutes = duration.value === 'permanent' ? null : Number(duration.value);
+                        runModerationAction(
+                            '/api/moderation/mute',
+                            { target_user_id: member.id, duration_minutes: durationMinutes, reason: '' },
+                            `${member.name} muted.`
+                        );
+                    });
+                    actions.append(duration, mute);
+                }
+
+                if (actorRole === 'owner' || actorRole === 'admin') {
+                    if (member.banned) {
+                        const unban = el('button', '', 'Unban');
+                        unban.type = 'button';
+                        unban.addEventListener('click', () => runModerationAction(
+                            '/api/moderation/unban',
+                            { target_user_id: member.id, reason: '' },
+                            `${member.name} unbanned.`
+                        ));
+                        actions.appendChild(unban);
+                    } else {
+                        const ban = el('button', 'ac-danger', 'Ban');
+                        ban.type = 'button';
+                        ban.addEventListener('click', () => {
+                            if (!confirm(`Ban ${member.name} from FLUX Chat?`)) return;
+                            runModerationAction(
+                                '/api/moderation/ban',
+                                { target_user_id: member.id, reason: '' },
+                                `${member.name} banned.`
+                            );
+                        });
+                        actions.appendChild(ban);
+                    }
+                }
+            }
+
+            row.append(top, sub);
+            if (actions.childNodes.length) row.appendChild(actions);
+            ui.manageMembers.appendChild(row);
+        }
+    }
+
+    async function loadModerationManage(loadAudit = true) {
+        if (!isStaffRole()) return;
+        setManageStatus('Loading...');
+        try {
+            const data = await api('/api/moderation/manage');
+            if (data.role && state.me) state.me.role = String(data.role).toLowerCase();
+            state.moderationMembers = Array.isArray(data.members) ? data.members : [];
+            state.staffRoles = {};
+            for (const member of state.moderationMembers) {
+                if (['owner', 'admin', 'moderator'].includes(String(member.role || '').toLowerCase())) {
+                    state.staffRoles[String(member.id)] = String(member.role).toLowerCase();
+                }
+            }
+            refreshManageVisibility();
+            if (ui.manageRole) ui.manageRole.textContent = currentRole();
+            renderModerationMembers();
+            setManageStatus(`${state.moderationMembers.length} members`);
+            if (loadAudit) await loadModerationAudit();
+        } catch (err) {
+            setManageStatus(err.message || 'Could not load moderation data', true);
+        }
+    }
+
+    async function openManagePanel() {
+        if (!isStaffRole() || !ui.manage) return;
+        ui.settings?.classList.remove('ac-show');
+        ui.emojiPicker?.classList.remove('ac-show');
+        closeMentionMenu();
+        ui.manage.classList.add('ac-show');
+        await loadModerationManage(true);
+        ui.manageSearch?.focus();
+    }
+
+    function markMessageDeleted(messageId) {
+        const id = String(messageId || '');
+        if (!id) return;
+        state.deletedMessageIds.add(id);
+        if (state.deletedMessageIds.size > 1000) {
+            const first = state.deletedMessageIds.values().next().value;
+            if (first) state.deletedMessageIds.delete(first);
+        }
+        for (const node of ui.body?.querySelectorAll('.ac-msg') || []) {
+            if (String(node.dataset.messageId || '') !== id) continue;
+            node.classList.add('ac-deleted');
+            const body = node.querySelector('.ac-text');
+            if (body) body.replaceChildren(el('span', 'ac-deleted-text', '[message removed by moderator]'));
+            node.querySelectorAll('.ac-mod-delete').forEach(button => button.remove());
+        }
+    }
+
+    async function deleteMessageAsModerator(msg) {
+        if (!isStaffRole() || !msg?.message_id) return;
+        if (!confirm(`Delete this message from ${msg.sender_name || 'this user'}?`)) return;
+        try {
+            await api(`/api/moderation/messages/${encodeURIComponent(msg.message_id)}/delete`, {
+                method: 'POST',
+                body: '{}',
+            });
+            markMessageDeleted(msg.message_id);
+            schedulePoll(0);
+            if (ui.manage?.classList.contains('ac-show')) {
+                await loadModerationAudit();
+            }
+        } catch (err) {
+            addSystem(`Could not delete message: ${err.message}`, true);
+        }
+    }
+
     function buildPanel() {
         if (document.getElementById(PANEL_ID)) return;
         const panel = el('div');
@@ -1948,6 +2340,8 @@
         const header = el('div', 'ac-header');
         const title = el('div', 'ac-title', state.roomName);
         const online = el('div', 'ac-online', 'offline');
+        const manageButton = el('button', 'ac-manage-button', 'Manage');
+        manageButton.type = 'button'; manageButton.title = 'Moderation';
         const settingsButton = el('button', '', '⚙');
         settingsButton.type = 'button'; settingsButton.title = 'Settings';
         const mobileSizeButton = el('button', 'ac-mobile-size', '⛶');
@@ -1956,7 +2350,7 @@
         min.type = 'button'; min.title = 'Hide';
         const close = el('button', '', '×');
         close.type = 'button'; close.title = 'Close';
-        header.append(title, online, settingsButton, mobileSizeButton, min, close);
+        header.append(title, online, manageButton, settingsButton, mobileSizeButton, min, close);
 
         const status = el('div', 'ac-status', 'Not connected');
         const body = el('div', 'ac-body');
@@ -2012,6 +2406,33 @@
             });
             emojiPicker.appendChild(item);
         }
+
+        const manage = el('div', 'ac-manage');
+        const manageHead = el('div', 'ac-manage-head');
+        const manageTitle = el('div', 'ac-manage-title', 'Manage');
+        const manageRole = el('div', 'ac-manage-role', currentRole());
+        const manageRefresh = el('button', 'ac-manage-refresh', 'Refresh');
+        manageRefresh.type = 'button';
+        const manageClose = el('button', 'ac-manage-close', '×');
+        manageClose.type = 'button';
+        manageClose.title = 'Close manage';
+        manageHead.append(manageTitle, manageRole, manageRefresh, manageClose);
+
+        const manageControls = el('div', 'ac-manage-controls');
+        const manageSearch = document.createElement('input');
+        manageSearch.className = 'ac-manage-search';
+        manageSearch.type = 'search';
+        manageSearch.placeholder = 'Search members...';
+        manageControls.appendChild(manageSearch);
+
+        const manageStatus = el('div', 'ac-manage-status');
+        const manageScroll = el('div', 'ac-manage-scroll');
+        const membersTitle = el('div', 'ac-manage-section-title', 'Members');
+        const manageMembers = el('div', 'ac-manage-members');
+        const auditTitle = el('div', 'ac-manage-section-title', 'Audit log');
+        const auditList = el('div', 'ac-audit-list');
+        manageScroll.append(membersTitle, manageMembers, auditTitle, auditList);
+        manage.append(manageHead, manageControls, manageStatus, manageScroll);
 
         const login = el('div', 'ac-login');
         const loginTitle = el('h3', '', 'FLUX Chat authentication');
@@ -2079,9 +2500,10 @@
 
         login.append(loginTitle, loginInfo, actions, shortNote, privacy, loginError);
 
-        panel.append(header, status, body, newMessages, composer, mentionMenu, emojiPicker, login, settings);
+        panel.append(header, status, body, newMessages, composer, mentionMenu, emojiPicker, login, settings, manage);
         document.body.appendChild(panel);
-        ui = { panel, header, title, online, settingsButton, mobileSizeButton, min, close, status, body, newMessages, textarea, mentionMenu, emojiButton, emojiPicker, send, login, input, loginButton, loginError, settings, themeSelect };
+        ui = { panel, header, title, online, manageButton, settingsButton, mobileSizeButton, min, close, status, body, newMessages, textarea, mentionMenu, emojiButton, emojiPicker, send, login, input, loginButton, loginError, settings, themeSelect, manage, manageRole, manageRefresh, manageClose, manageSearch, manageStatus, manageMembers, auditList };
+        refreshManageVisibility();
 
         applyTheme(state.theme, false);
 
@@ -2132,6 +2554,22 @@
         online.addEventListener('click', triggerUpdateOpen);
         online.addEventListener('pointerup', triggerUpdateOpen);
 
+        manageButton.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            openManagePanel();
+        });
+
+        manageClose.addEventListener('click', () => {
+            manage.classList.remove('ac-show');
+        });
+
+        manageRefresh.addEventListener('click', () => {
+            loadModerationManage(true);
+        });
+
+        manageSearch.addEventListener('input', renderModerationMembers);
+
         settingsButton.addEventListener('click', (e) => {
             e.stopPropagation();
             settings.classList.toggle('ac-show');
@@ -2146,6 +2584,7 @@
             saveCurrentPanelGeometry();
             panel.classList.remove('ac-visible');
             settings.classList.remove('ac-show');
+            manage.classList.remove('ac-show');
             panel.classList.remove('ac-minimized');
             saveUiState({ visible: false, minimized: false });
             schedulePoll(POLL_CLOSED_MS);
@@ -2155,6 +2594,7 @@
             saveCurrentPanelGeometry();
             panel.classList.remove('ac-visible');
             settings.classList.remove('ac-show');
+            manage.classList.remove('ac-show');
             saveUiState({ visible: false });
             schedulePoll(POLL_CLOSED_MS);
         });
@@ -2736,7 +3176,15 @@
                 GM_setValue(TOKEN_KEY, state.token);
                 GM_setValue(REFRESH_TOKEN_KEY, state.refreshToken);
 
-                if (result.user) state.me = result.user;
+                if (result.user) {
+                    state.me = result.user;
+                    if (isStaffRole(state.me.role)) {
+                        state.staffRoles[String(state.me.id)] = String(state.me.role).toLowerCase();
+                    } else {
+                        delete state.staffRoles[String(state.me.id)];
+                    }
+                    refreshManageVisibility();
+                }
                 return result;
             } finally {
                 releaseRefreshLock();
@@ -2878,7 +3326,7 @@
 
                     if (interactive) {
                         showLogin(err.status === 403
-                            ? 'Your faction is not authorized.'
+                            ? (err.message || 'Chat access was revoked.')
                             : 'Session expired. Verify again.');
                     } else {
                         renderConnectionState('offline');
@@ -2925,6 +3373,12 @@
         state.historyLoading = false;
         state.historyExhausted = false;
         state.mentionDirectory = { users: [], factions: [] };
+        state.me = null;
+        state.staffRoles = {};
+        state.moderationMembers = [];
+        state.moderationAudit = [];
+        state.deletedMessageIds.clear();
+        refreshManageVisibility();
         state.mentionSuggestions = [];
         state.mentionSelection = 0;
         state.seenMessageIds.clear();
@@ -2963,7 +3417,9 @@
         state.roomName = data.room.name;
         state.keyVersion = data.key_version;
         state.me = data.user;
+        state.staffRoles = { ...(data.staff_roles || {}) };
         state.factionNames = { ...state.factionNames, ...(data.faction_names || {}) };
+        refreshManageVisibility();
         normalizeMentionDirectory(data.mention_directory);
         if (data.user?.faction_name) {
             state.factionNames[String(data.user.faction_id)] = data.user.faction_name;
@@ -3040,6 +3496,7 @@
 
                 if (
                     !activelyViewing &&
+                    !renderInfo?.suppressUnread &&
                     Number(msg.seq || 0) > state.lastReadSeq &&
                     Number(msg.sender_id) !== Number(state.me?.id)
                 ) {
@@ -3174,7 +3631,7 @@
                 logoutLocal();
                 showLogin(
                     err.status === 403
-                        ? 'Faction access was revoked.'
+                        ? (err.message || 'Chat access was revoked.')
                         : 'Session expired. Verify again.'
                 );
             }
@@ -3226,7 +3683,9 @@
                 const panelClosed = !ui.panel.classList.contains('ac-visible');
                 const minimized = ui.panel.classList.contains('ac-minimized');
                 const pageInactive = !isPageActive();
-                const fromOtherUser = Number(msg.sender_id) !== Number(state.me?.id);
+                const fromOtherUser =
+                    msg.type === 'message' &&
+                    Number(msg.sender_id) !== Number(state.me?.id);
 
                 // "Open" does not automatically mean "read": if the user has
                 // scrolled up, preserve the unread badge and show the in-chat
@@ -3239,6 +3698,7 @@
 
                 if (
                     fromOtherUser &&
+                    !renderInfo?.suppressUnread &&
                     !wasActivelyViewingLive &&
                     (isPageActive() || state.notifyLeader)
                 ) {
@@ -3273,7 +3733,7 @@
                 logoutLocal();
                 showLogin(
                     err.status === 403
-                        ? 'Faction access was revoked.'
+                        ? (err.message || 'Chat access was revoked.')
                         : 'Session expired. Verify again.'
                 );
                 return;
@@ -3346,10 +3806,13 @@
                 try {
                     await loadBootstrap(true);
                 } catch (_) {}
+            } else if (err.status === 423) {
+                ui.textarea.value = originalText;
+                addSystem(err.message || 'You are currently muted.', true);
             } else if (err.status === 401 || err.status === 403) {
                 ui.textarea.value = originalText;
                 logoutLocal();
-                showLogin('Session expired or faction access was revoked.');
+                showLogin(err.message || 'Session expired or chat access was revoked.');
             } else {
                 ui.textarea.value = originalText;
                 addSystem(`Could not send message: ${err.message}`, true);
@@ -3396,13 +3859,25 @@
     }
 
     async function renderEncryptedMessage(msg, prepend = false) {
-        let text;
-        try { text = await decryptMessage(msg); }
-        catch (_) { text = '[Unable to decrypt this message]'; }
-
         const wasNearBottom = prepend ? false : isNearBottom();
 
-        const wrap = el('div', 'ac-msg');
+        if (msg?.type === 'message_deleted') {
+            markMessageDeleted(msg.target_message_id);
+            return {
+                mentionsMe: false,
+                wasNearBottom,
+                suppressUnread: true,
+            };
+        }
+
+        const deleted = Boolean(msg?.deleted) || state.deletedMessageIds.has(String(msg?.message_id || ''));
+        let text = '';
+        if (!deleted) {
+            try { text = await decryptMessage(msg); }
+            catch (_) { text = '[Unable to decrypt this message]'; }
+        }
+
+        const wrap = el('div', `ac-msg${deleted ? ' ac-deleted' : ''}`);
         wrap.dataset.messageId = String(msg.message_id || '');
         wrap.dataset.seq = String(msg.seq || '');
         const meta = el('div', 'ac-meta');
@@ -3443,12 +3918,32 @@
         stamp.title = formatLocalTime(msg.created_at);
         const body = el('div', 'ac-text');
 
-        // Still no innerHTML: plaintext pieces are Text nodes and recognized
-        // mention tokens become spans created by this userscript.
-        const parsed = parseMentionTokenText(text);
-        body.appendChild(parsed.fragment);
+        let mentionsMe = false;
+        if (deleted) {
+            body.appendChild(el('span', 'ac-deleted-text', '[message removed by moderator]'));
+            state.deletedMessageIds.add(String(msg.message_id || ''));
+        } else {
+            // Still no innerHTML: plaintext pieces are Text nodes and recognized
+            // mention tokens become spans created by this userscript.
+            const parsed = parseMentionTokenText(text);
+            mentionsMe = parsed.mentionsMe;
+            body.appendChild(parsed.fragment);
+        }
 
         meta.append(name, faction, stamp);
+
+        if (!deleted && isStaffRole() && canModerateTarget(msg.sender_id)) {
+            const deleteButton = el('button', 'ac-mod-delete', '×');
+            deleteButton.type = 'button';
+            deleteButton.title = 'Delete message';
+            deleteButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                deleteMessageAsModerator(msg);
+            });
+            meta.appendChild(deleteButton);
+        }
+
         wrap.append(meta, body);
 
         if (prepend) {
@@ -3465,10 +3960,12 @@
         }
 
         return {
-            mentionsMe: parsed.mentionsMe,
+            mentionsMe,
             wasNearBottom,
+            suppressUnread: deleted,
         };
     }
+
 
 
     function addSystem(text, isError = false) {
