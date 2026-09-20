@@ -3,7 +3,7 @@
 // @namespace    almanac.shared.chat
 // @updateURL   https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
 // @downloadURL https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
-// @version      0.1.60
+// @version      0.1.61
 // @description  Secure shared chat for approved Torn factions using CSP-safe HTTP polling; does not scrape Torn pages.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -54,6 +54,11 @@
     const REFRESH_WAIT_MS = 22000;
     const REQUEST_TIMEOUT_MS = 15000;
     const MAX_RENDERED_MESSAGES = 500;
+    const CUSTOM_EMOJI_MANIFEST_PATH = '/assets/emojis/manifest.json';
+    const CUSTOM_EMOJI_MANIFEST_TIMEOUT_MS = 5000;
+    const CUSTOM_EMOJI_MAX = 100;
+    const CUSTOM_EMOJI_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/i;
+    const DIRECT_IMAGE_EXTENSIONS = /\.(?:png|jpe?g|webp|gif|avif)$/i;
     const TAB_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 
     const THEME_ASSETS = {
@@ -153,6 +158,8 @@
         mentionDirectory: { users: [], factions: [] },
         mentionSuggestions: [],
         mentionSelection: 0,
+        customEmojis: new Map(),
+        customEmojiReadyPromise: null,
         pollTimer: null,
         pollInFlight: false,
         pollFailures: 0,
@@ -614,6 +621,51 @@
             #${PANEL_ID} .ac-faction { color: var(--ac-faction); font-size: 9px; }
             #${PANEL_ID} .ac-text { color: var(--ac-message-text); white-space: pre-wrap; }
 
+            #${PANEL_ID} .ac-link {
+                color: var(--ac-name);
+                text-decoration: underline;
+                overflow-wrap: anywhere;
+            }
+
+            #${PANEL_ID} .ac-link:hover {
+                filter: brightness(1.15);
+            }
+
+            #${PANEL_ID} .ac-custom-emoji {
+                display: inline-block;
+                width: 22px;
+                height: 22px;
+                margin: 0 1px;
+                object-fit: contain;
+                vertical-align: -5px;
+                user-select: none;
+            }
+
+            #${PANEL_ID} .ac-image-link {
+                display: block;
+                width: fit-content;
+                max-width: 100%;
+                margin: 5px 0 2px;
+                text-decoration: none;
+            }
+
+            #${PANEL_ID} .ac-image-preview {
+                display: block;
+                max-width: min(320px, 100%);
+                max-height: 240px;
+                border: 1px solid var(--ac-border);
+                border-radius: 5px;
+                background: rgba(0,0,0,.22);
+                object-fit: contain;
+                box-sizing: border-box;
+            }
+
+            #${PANEL_ID} .ac-image-fallback {
+                color: var(--ac-name);
+                text-decoration: underline;
+                overflow-wrap: anywhere;
+            }
+
             /* Mentions are visually ordinary for people who are not the target. */
             #${PANEL_ID} .ac-mention {
                 color: inherit;
@@ -800,6 +852,15 @@
             #${PANEL_ID} .ac-emoji-item:hover {
                 background: rgba(255,255,255,.08);
             }
+
+            #${PANEL_ID} .ac-custom-emoji-item img {
+                width: 24px;
+                height: 24px;
+                object-fit: contain;
+                vertical-align: middle;
+                pointer-events: none;
+            }
+
             #${PANEL_ID} .ac-send:disabled { opacity: .45; cursor: default; }
             #${PANEL_ID} .ac-login {
                 position: absolute; inset: 38px 0 0 0; z-index: 3;
@@ -994,6 +1055,11 @@
                     width: min(260px, calc(100vw - 28px));
                     max-height: 200px;
                     grid-template-columns: repeat(6, 1fr);
+                }
+
+                #${PANEL_ID} .ac-image-preview {
+                    max-width: 100%;
+                    max-height: 35dvh;
                 }
 
                 #${PANEL_ID} .ac-mention-menu {
@@ -1261,7 +1327,7 @@
     function currentUserscriptVersion() {
         return String(
             globalThis.GM_info?.script?.version ||
-            '0.1.60'
+            '0.1.61'
         );
     }
 
@@ -1547,6 +1613,239 @@
         );
     }
 
+    function normalizeCustomEmojiUrl(rawUrl) {
+        try {
+            const base = new URL(API_BASE);
+            const url = new URL(String(rawUrl || ''), `${API_BASE}/assets/emojis/`);
+
+            // Custom emoji is deliberately restricted to our own static emoji
+            // directory. The manifest cannot turn FLUX Chat into an arbitrary
+            // third-party image loader.
+            if (url.protocol !== 'https:') return '';
+            if (url.origin !== base.origin) return '';
+            if (!url.pathname.startsWith('/assets/emojis/')) return '';
+            if (!DIRECT_IMAGE_EXTENSIONS.test(url.pathname)) return '';
+
+            return url.href;
+        } catch (_) {
+            return '';
+        }
+    }
+
+    function parseCustomEmojiManifest(data) {
+        const entries = [];
+
+        if (Array.isArray(data?.emojis)) {
+            for (const item of data.emojis) {
+                if (!item || typeof item !== 'object') continue;
+                entries.push([item.name, item.url]);
+            }
+        } else if (data?.emojis && typeof data.emojis === 'object') {
+            entries.push(...Object.entries(data.emojis));
+        } else if (data && typeof data === 'object' && !Array.isArray(data)) {
+            entries.push(...Object.entries(data));
+        }
+
+        const result = new Map();
+
+        for (const [rawName, rawUrl] of entries) {
+            if (result.size >= CUSTOM_EMOJI_MAX) break;
+
+            const name = String(rawName || '').trim().toLowerCase();
+            if (!CUSTOM_EMOJI_NAME_PATTERN.test(name)) continue;
+
+            // Preserve the existing native shortcode meanings such as :fire:.
+            if (Object.prototype.hasOwnProperty.call(EMOJI_SHORTCODES, name)) continue;
+
+            const url = normalizeCustomEmojiUrl(rawUrl);
+            if (!url) continue;
+
+            result.set(name, url);
+        }
+
+        return result;
+    }
+
+    function refreshCustomEmojiPicker() {
+        if (!ui.emojiPicker || !ui.textarea) return;
+
+        ui.emojiPicker
+            .querySelectorAll('.ac-custom-emoji-item')
+            .forEach(node => node.remove());
+
+        for (const [name, url] of [...state.customEmojis.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+            const item = el('button', 'ac-emoji-item ac-custom-emoji-item');
+            item.type = 'button';
+            item.title = `:${name}:`;
+
+            const img = document.createElement('img');
+            img.src = url;
+            img.alt = `:${name}:`;
+            img.loading = 'lazy';
+            img.decoding = 'async';
+            img.referrerPolicy = 'no-referrer';
+            img.draggable = false;
+
+            item.appendChild(img);
+            item.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                insertTextAtCursor(ui.textarea, `:${name}:`);
+                ui.emojiPicker.classList.remove('ac-show');
+            });
+
+            ui.emojiPicker.appendChild(item);
+        }
+    }
+
+    async function loadCustomEmojiManifest() {
+        try {
+            // /assets/ is normally cached aggressively. A five-minute query bucket
+            // lets manifest edits propagate promptly without disabling image caching.
+            const bucket = Math.floor(Date.now() / (5 * 60 * 1000));
+            const data = await apiRaw(
+                `${CUSTOM_EMOJI_MANIFEST_PATH}?v=${bucket}`,
+                {
+                    skipAuth: true,
+                    timeout: CUSTOM_EMOJI_MANIFEST_TIMEOUT_MS,
+                }
+            );
+
+            state.customEmojis = parseCustomEmojiManifest(data);
+        } catch (_) {
+            // Custom emoji is optional. A missing/invalid manifest must never stop chat.
+            state.customEmojis = new Map();
+        }
+
+        refreshCustomEmojiPicker();
+        return state.customEmojis;
+    }
+
+    function ensureCustomEmojiReady() {
+        if (!state.customEmojiReadyPromise) {
+            state.customEmojiReadyPromise = loadCustomEmojiManifest();
+        }
+        return state.customEmojiReadyPromise;
+    }
+
+    function createCustomEmojiNode(name, url) {
+        const img = document.createElement('img');
+        img.className = 'ac-custom-emoji';
+        img.src = url;
+        img.alt = `:${name}:`;
+        img.title = `:${name}:`;
+        img.loading = 'lazy';
+        img.decoding = 'async';
+        img.referrerPolicy = 'no-referrer';
+        img.draggable = false;
+
+        img.addEventListener('error', () => {
+            if (img.isConnected) {
+                img.replaceWith(document.createTextNode(`:${name}:`));
+            }
+        }, { once: true });
+
+        return img;
+    }
+
+    function trimUrlTrailingPunctuation(rawUrl) {
+        let urlText = String(rawUrl || '');
+        let trailing = '';
+
+        // Chat prose commonly ends a URL with punctuation. Keep that punctuation
+        // outside the clickable/preview URL instead of requesting it as part of it.
+        while (/[.,!?;:)\]}]$/.test(urlText)) {
+            trailing = urlText.slice(-1) + trailing;
+            urlText = urlText.slice(0, -1);
+        }
+
+        return { urlText, trailing };
+    }
+
+    function createHttpsLinkNode(rawUrl) {
+        let url;
+        try {
+            url = new URL(rawUrl);
+        } catch (_) {
+            return null;
+        }
+
+        if (url.protocol !== 'https:') return null;
+
+        const isImage = DIRECT_IMAGE_EXTENSIONS.test(url.pathname);
+        const link = el('a', isImage ? 'ac-image-link' : 'ac-link');
+        link.href = url.href;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.referrerPolicy = 'no-referrer';
+        link.title = url.href;
+
+        if (!isImage) {
+            link.textContent = rawUrl;
+            return link;
+        }
+
+        const img = document.createElement('img');
+        img.className = 'ac-image-preview';
+        img.src = url.href;
+        img.alt = 'Image preview';
+        img.loading = 'lazy';
+        img.decoding = 'async';
+        img.referrerPolicy = 'no-referrer';
+        img.draggable = false;
+
+        // If hotlinking is blocked or the URL is no longer an image, keep a
+        // normal clickable link rather than leaving a broken-image icon.
+        img.addEventListener('error', () => {
+            if (!link.isConnected) return;
+            link.className = 'ac-link';
+            link.replaceChildren(el('span', 'ac-image-fallback', rawUrl));
+        }, { once: true });
+
+        link.appendChild(img);
+        return link;
+    }
+
+    function appendRichText(parent, value) {
+        const source = String(value || '');
+        const pattern = /:([a-z0-9][a-z0-9_-]{0,31}):|(https:\/\/[^\s<>"']+)/gi;
+        let lastIndex = 0;
+        let match;
+
+        while ((match = pattern.exec(source)) !== null) {
+            if (match.index > lastIndex) {
+                parent.appendChild(document.createTextNode(source.slice(lastIndex, match.index)));
+            }
+
+            if (match[1]) {
+                const name = match[1].toLowerCase();
+                const url = state.customEmojis.get(name);
+
+                if (url) {
+                    parent.appendChild(createCustomEmojiNode(name, url));
+                } else {
+                    parent.appendChild(document.createTextNode(match[0]));
+                }
+            } else {
+                const { urlText, trailing } = trimUrlTrailingPunctuation(match[2]);
+                const node = createHttpsLinkNode(urlText);
+
+                if (node) {
+                    parent.appendChild(node);
+                    if (trailing) parent.appendChild(document.createTextNode(trailing));
+                } else {
+                    parent.appendChild(document.createTextNode(match[0]));
+                }
+            }
+
+            lastIndex = pattern.lastIndex;
+        }
+
+        if (lastIndex < source.length) {
+            parent.appendChild(document.createTextNode(source.slice(lastIndex)));
+        }
+    }
+
     function parseMentionTokenText(text) {
         const fragment = document.createDocumentFragment();
         const tokenPattern = /<@(u|f):(\d+):([A-Za-z0-9_-]{1,64})>/g;
@@ -1556,9 +1855,7 @@
 
         while ((match = tokenPattern.exec(String(text || ''))) !== null) {
             if (match.index > lastIndex) {
-                fragment.appendChild(
-                    document.createTextNode(text.slice(lastIndex, match.index))
-                );
+                appendRichText(fragment, text.slice(lastIndex, match.index));
             }
 
             const type = match[1];
@@ -1616,7 +1913,7 @@
         }
 
         if (lastIndex < String(text || '').length) {
-            fragment.appendChild(document.createTextNode(text.slice(lastIndex)));
+            appendRichText(fragment, text.slice(lastIndex));
         }
 
         return { fragment, mentionsMe };
@@ -2568,6 +2865,7 @@
                     state.pollTimer = null;
                 }
 
+                await ensureCustomEmojiReady();
                 await loadBootstrap(renderHistory);
                 state.initialized = true;
                 refreshNotifyLeadership();
@@ -3383,6 +3681,7 @@
 
         addStyles();
         buildPanel();
+        ensureCustomEmojiReady();
         installLauncher();
 
         // Run after buildPanel so a discovered update can be rendered immediately.
