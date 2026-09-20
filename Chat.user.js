@@ -3,7 +3,7 @@
 // @namespace    almanac.shared.chat
 // @updateURL   https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
 // @downloadURL https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
-// @version      0.1.59
+// @version      0.1.60
 // @description  Secure shared chat for approved Torn factions using CSP-safe HTTP polling; does not scrape Torn pages.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -1261,7 +1261,7 @@
     function currentUserscriptVersion() {
         return String(
             globalThis.GM_info?.script?.version ||
-            '0.1.59'
+            '0.1.60'
         );
     }
 
@@ -3207,18 +3207,34 @@
         const d = parseServerTimestamp(value);
         if (!d) return '';
 
-        const parts = new Intl.DateTimeFormat('en-GB', {
-            timeZone: 'UTC',
-            day: '2-digit',
-            month: 'short',
-            year: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit',
-            hourCycle: 'h23',
-        }).formatToParts(d);
+        // Torn City Time is UTC. Work in UTC calendar days so the label changes
+        // at TCT midnight regardless of the viewer's local timezone.
+        const now = new Date();
+        const todayTct = Date.UTC(
+            now.getUTCFullYear(),
+            now.getUTCMonth(),
+            now.getUTCDate()
+        );
+        const messageDayTct = Date.UTC(
+            d.getUTCFullYear(),
+            d.getUTCMonth(),
+            d.getUTCDate()
+        );
+        const daysAgo = Math.floor((todayTct - messageDayTct) / 86400000);
 
-        const pick = type => parts.find(part => part.type === type)?.value || '';
-        return `${pick('day')} ${pick('month')} ${pick('year')} · ${pick('hour')}:${pick('minute')} TCT`;
+        if (daysAgo === 0) {
+            const hh = String(d.getUTCHours()).padStart(2, '0');
+            const mm = String(d.getUTCMinutes()).padStart(2, '0');
+            return `today: ${hh}:${mm} TCT`;
+        }
+
+        if (daysAgo === 1) return '1 day ago';
+        if (daysAgo === 2) return '2 days ago';
+
+        const dd = String(d.getUTCDate()).padStart(2, '0');
+        const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+        const yy = String(d.getUTCFullYear()).slice(-2);
+        return `${dd}/${mm}-${yy}`;
     }
 
     function formatLocalTime(value) {
