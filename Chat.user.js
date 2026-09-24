@@ -3,7 +3,7 @@
 // @namespace    almanac.shared.chat
 // @updateURL   https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
 // @downloadURL https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
-// @version      0.1.63
+// @version      0.1.65
 // @description  Secure shared chat for approved Torn factions using CSP-safe HTTP polling; does not scrape Torn pages.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -2450,8 +2450,16 @@
         const inputLabel = el('div', 'ac-login-label', 'Paste your API key:');
         const input = document.createElement('input');
         input.type = 'password';
+        input.id = 'flux-chat-api-key';
+        input.name = 'flux-chat-api-key';
         input.placeholder = 'Paste Torn API key';
         input.autocomplete = 'off';
+        input.setAttribute('data-lpignore', 'true');
+        input.setAttribute('data-1p-ignore', 'true');
+        input.setAttribute('data-bwignore', 'true');
+        input.setAttribute('autocorrect', 'off');
+        input.setAttribute('autocapitalize', 'none');
+        input.spellcheck = false;
 
         const loginButton = el('button', '', 'Verify and connect');
         loginButton.type = 'button';
@@ -2500,7 +2508,10 @@
 
         login.append(loginTitle, loginInfo, actions, shortNote, privacy, loginError);
 
-        panel.append(header, status, body, newMessages, composer, mentionMenu, emojiPicker, login, settings, manage);
+        // Keep the login/password subtree detached during normal authenticated use.
+        // Password managers can otherwise see a hidden password input and incorrectly
+        // pair it with an unrelated text/search field from Torn or another userscript.
+        panel.append(header, status, body, newMessages, composer, mentionMenu, emojiPicker, settings, manage);
         document.body.appendChild(panel);
         ui = { panel, header, title, online, manageButton, settingsButton, mobileSizeButton, min, close, status, body, newMessages, textarea, mentionMenu, emojiButton, emojiPicker, send, login, input, loginButton, loginError, settings, themeSelect, manage, manageRole, manageRefresh, manageClose, manageSearch, manageStatus, manageMembers, auditList };
         refreshManageVisibility();
@@ -2595,6 +2606,7 @@
             panel.classList.remove('ac-visible');
             settings.classList.remove('ac-show');
             manage.classList.remove('ac-show');
+            if (login.classList.contains('ac-show')) unmountLoginPanel();
             saveUiState({ visible: false });
             schedulePoll(POLL_CLOSED_MS);
         });
@@ -2800,6 +2812,7 @@
                 saveCurrentPanelGeometry();
                 ui.panel.classList.remove('ac-visible');
                 ui.settings?.classList.remove('ac-show');
+                if (ui.login?.classList.contains('ac-show')) unmountLoginPanel();
                 saveUiState({ visible: false });
                 schedulePoll(POLL_CLOSED_MS);
                 return;
@@ -3267,7 +3280,7 @@
             GM_setValue(TOKEN_KEY, state.token);
             if (state.refreshToken) GM_setValue(REFRESH_TOKEN_KEY, state.refreshToken);
             state.me = result.user;
-            ui.login.classList.remove('ac-show');
+            unmountLoginPanel();
             state.initialized = false;
             await loadBootstrap(true);
             state.initialized = true;
@@ -3348,12 +3361,32 @@
         }
     }
 
+    function mountLoginPanel() {
+        if (!ui.panel || !ui.login) return;
+        if (!ui.login.isConnected) {
+            ui.panel.appendChild(ui.login);
+        }
+    }
+
+    function unmountLoginPanel() {
+        if (!ui.login) return;
+        ui.login.classList.remove('ac-show');
+        if (ui.input) ui.input.value = '';
+        if (ui.login.isConnected) {
+            ui.login.remove();
+        }
+    }
+
     function showLogin(message = '') {
         buildPanel();
+        mountLoginPanel();
         ui.panel.classList.add('ac-visible');
         ui.login.classList.add('ac-show');
         ui.loginError.textContent = message;
-        ui.input.focus();
+
+        // Do not programmatically focus a password field. Autofill/password-manager
+        // heuristics commonly run on focus and can target unrelated inputs elsewhere
+        // on the page. The user can click the API-key field when they need it.
     }
 
     function logoutLocal() {
