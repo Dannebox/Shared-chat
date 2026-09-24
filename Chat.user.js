@@ -3,7 +3,7 @@
 // @namespace    almanac.shared.chat
 // @updateURL   https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
 // @downloadURL https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
-// @version      0.1.65
+// @version      0.1.67
 // @description  Secure shared chat for approved Torn factions using CSP-safe HTTP polling; does not scrape Torn pages.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -28,6 +28,7 @@
     const UI_STATE_KEY = 'alliance_chat_ui_state_v1';
     const DESKTOP_GEOMETRY_KEY = 'alliance_chat_desktop_geometry_v1';
     const THEME_KEY = 'alliance_chat_theme_v1';
+    const IMAGE_PREVIEW_KEY = 'alliance_chat_external_image_previews_v1';
     const PANEL_ID = 'almanac-alliance-chat';
     const LAUNCHER_ID = 'almanac-alliance-chat-launcher';
     const POLL_OPEN_MS = 3000;
@@ -59,6 +60,8 @@
     const CUSTOM_EMOJI_MAX = 100;
     const CUSTOM_EMOJI_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/i;
     const DIRECT_IMAGE_EXTENSIONS = /\.(?:png|jpe?g|webp|gif|avif)$/i;
+    const MESSAGE_ENVELOPE_PREFIX = 'FLUXMSG1:';
+    const REPLY_JUMP_MAX_PAGES = 25;
     const TAB_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 
     const THEME_ASSETS = {
@@ -173,11 +176,14 @@
         seenMessageIds: new Set(),
         factionNames: {},
         theme: THEMES.has(GM_getValue(THEME_KEY, 'default')) ? GM_getValue(THEME_KEY, 'default') : 'default',
+        externalImagePreviews: GM_getValue(IMAGE_PREVIEW_KEY, true) !== false,
         updateAvailable: GM_getValue(UPDATE_AVAILABLE_KEY, ''),
         historyLoaded: 0,
         oldestHistorySeq: 0,
         historyLoading: false,
         historyExhausted: false,
+        historyServerExhausted: false,
+        replyingTo: null,
     };
 
     let ui = {};
@@ -625,9 +631,96 @@
             #${PANEL_ID} .ac-manage-scroll::-webkit-scrollbar-thumb:hover {
                 background: var(--ac-scroll-thumb-hover);
             }
-            #${PANEL_ID} .ac-msg { margin: 0 0 7px 0; word-break: break-word; line-height: 1.32; }
+            #${PANEL_ID} .ac-msg { margin: 0 0 7px 0; word-break: break-word; line-height: 1.32; border-radius: 4px; }
             #${PANEL_ID} .ac-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px; margin-bottom: 1px; }
             #${PANEL_ID} .ac-name { color: var(--ac-name); font-weight: 700; text-decoration: none; cursor: pointer; }
+
+            #${PANEL_ID} .ac-reply-button {
+                width: 18px;
+                height: 18px;
+                padding: 0;
+                border: 0;
+                background: transparent;
+                color: var(--ac-muted);
+                cursor: pointer;
+                font-size: 14px;
+                line-height: 16px;
+                opacity: 0;
+                pointer-events: none;
+                transition: opacity .12s ease;
+            }
+
+            #${PANEL_ID} .ac-msg:hover .ac-reply-button,
+            #${PANEL_ID} .ac-reply-button:focus-visible {
+                opacity: 1;
+                pointer-events: auto;
+            }
+
+            #${PANEL_ID} .ac-reply-button:hover {
+                color: var(--ac-name);
+            }
+
+            #${PANEL_ID} .ac-reply-ref {
+                display: flex;
+                align-items: center;
+                gap: 0;
+                width: fit-content;
+                max-width: 100%;
+                min-width: 145px;
+                margin: 1px 0 4px;
+                padding: 2px 7px 4px;
+                box-sizing: border-box;
+                border: 0;
+                border-left: 2px solid var(--ac-accent);
+                border-bottom: 1px solid rgba(255,255,255,.18);
+                border-radius: 0 0 0 3px;
+                background: transparent;
+                color: var(--ac-muted);
+                cursor: pointer;
+                font: inherit;
+                font-size: 10px;
+                text-align: left;
+            }
+
+            #${PANEL_ID} .ac-reply-ref:hover {
+                color: var(--ac-text);
+                border-bottom-color: var(--ac-name);
+            }
+
+            #${PANEL_ID} .ac-reply-author {
+                color: var(--ac-name);
+                font-weight: 700;
+                margin-left: 3px;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+
+            #${PANEL_ID} .ac-reply-ref.ac-reply-missing {
+                cursor: default;
+                color: var(--ac-muted);
+                border-left-color: var(--ac-muted);
+                opacity: .75;
+            }
+
+            #${PANEL_ID} .ac-reply-ref.ac-reply-missing:hover {
+                border-bottom-color: rgba(255,255,255,.18);
+            }
+
+            #${PANEL_ID} .ac-reply-target-highlight {
+                animation: acReplyTargetFlash 1s ease-out;
+            }
+
+            @keyframes acReplyTargetFlash {
+                0% {
+                    background: rgba(255, 208, 92, .30);
+                    box-shadow: 0 0 0 2px rgba(255, 208, 92, .48);
+                }
+                100% {
+                    background: transparent;
+                    box-shadow: 0 0 0 0 rgba(255, 208, 92, 0);
+                }
+            }
             #${PANEL_ID} .ac-name:hover { text-decoration: underline; }
             #${PANEL_ID} .ac-time { color: var(--ac-time); font-size: 9px; margin-left: auto; white-space: nowrap; }
             #${PANEL_ID} .ac-faction { color: var(--ac-faction); font-size: 9px; }
@@ -804,8 +897,59 @@
             }
             #${PANEL_ID} .ac-new-messages.ac-show { display: block; }
             #${PANEL_ID} .ac-composer {
-                display: flex; align-items: flex-end; gap: 5px;
+                display: flex; align-items: flex-end; flex-wrap: wrap; gap: 5px;
                 padding: 6px; background: var(--ac-composer-bg); border-top: 1px solid #111;
+            }
+
+            #${PANEL_ID} .ac-reply-compose {
+                display: none;
+                align-items: center;
+                flex: 0 0 100%;
+                min-width: 0;
+                min-height: 22px;
+                padding: 0 2px 3px;
+                box-sizing: border-box;
+                color: var(--ac-muted);
+                font-size: 10px;
+            }
+
+            #${PANEL_ID} .ac-reply-compose.ac-show {
+                display: flex;
+            }
+
+            #${PANEL_ID} .ac-reply-compose-target {
+                min-width: 0;
+                flex: 1;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+                padding: 0;
+                border: 0;
+                background: transparent;
+                color: var(--ac-muted);
+                cursor: pointer;
+                font: inherit;
+                text-align: left;
+            }
+
+            #${PANEL_ID} .ac-reply-compose-target strong {
+                color: var(--ac-name);
+            }
+
+            #${PANEL_ID} .ac-reply-cancel {
+                width: 20px;
+                height: 20px;
+                padding: 0;
+                border: 0;
+                background: transparent;
+                color: var(--ac-muted);
+                cursor: pointer;
+                font-size: 15px;
+                line-height: 18px;
+            }
+
+            #${PANEL_ID} .ac-reply-cancel:hover {
+                color: #fff;
             }
             #${PANEL_ID} .ac-composer textarea {
                 flex: 1; resize: none; min-height: 34px; max-height: 90px;
@@ -1061,7 +1205,9 @@
             #${PANEL_ID} .ac-settings.ac-show { display: block; }
             #${PANEL_ID} .ac-settings-title { font-weight: 700; margin-bottom: 8px; }
             #${PANEL_ID} .ac-settings-label { font-size: 10px; color: var(--ac-muted); margin-bottom: 4px; }
-            #${PANEL_ID} .ac-theme-select {
+            #${PANEL_ID} .ac-settings-label.ac-settings-label-spaced { margin-top: 10px; }
+            #${PANEL_ID} .ac-theme-select,
+            #${PANEL_ID} .ac-image-preview-select {
                 width: 100%;
                 padding: 6px;
                 border: 1px solid var(--ac-border);
@@ -1069,6 +1215,38 @@
                 background: var(--ac-input-bg);
                 color: var(--ac-text);
                 outline: none;
+            }
+
+            #${PANEL_ID} .ac-image-deferred {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                max-width: 100%;
+                margin: 4px 0 2px;
+            }
+
+            #${PANEL_ID} .ac-image-deferred .ac-link {
+                min-width: 0;
+                flex: 1;
+                overflow-wrap: anywhere;
+            }
+
+            #${PANEL_ID} .ac-load-image {
+                flex: 0 0 auto;
+                min-height: 24px;
+                padding: 3px 7px;
+                border: 1px solid var(--ac-border);
+                border-radius: 3px;
+                background: var(--ac-input-bg);
+                color: var(--ac-text);
+                cursor: pointer;
+                font: inherit;
+                font-size: 10px;
+                white-space: nowrap;
+            }
+
+            #${PANEL_ID} .ac-load-image:hover {
+                filter: brightness(1.15);
             }
 
             #${PANEL_ID} .ac-mobile-size { display: none; }
@@ -1133,6 +1311,16 @@
                 #${PANEL_ID} .ac-composer {
                     padding: 8px; gap: 7px;
                     padding-bottom: max(8px, env(safe-area-inset-bottom));
+                }
+
+                #${PANEL_ID} .ac-reply-button {
+                    opacity: 1;
+                    pointer-events: auto;
+                }
+
+                #${PANEL_ID}.ac-has-reply .ac-emoji-picker,
+                #${PANEL_ID}.ac-has-reply .ac-mention-menu {
+                    bottom: 84px;
                 }
                 #${PANEL_ID} .ac-composer textarea {
                     min-height: 42px; max-height: 84px; padding: 9px;
@@ -1864,28 +2052,15 @@
         return { urlText, trailing };
     }
 
-    function createHttpsLinkNode(rawUrl) {
-        let url;
-        try {
-            url = new URL(rawUrl);
-        } catch (_) {
-            return null;
-        }
-
-        if (url.protocol !== 'https:') return null;
-
-        const isImage = DIRECT_IMAGE_EXTENSIONS.test(url.pathname);
-        const link = el('a', isImage ? 'ac-image-link' : 'ac-link');
+    function createExternalImagePreviewNode(rawUrl, url) {
+        const link = el('a', 'ac-image-link');
         link.href = url.href;
         link.target = '_blank';
         link.rel = 'noopener noreferrer';
         link.referrerPolicy = 'no-referrer';
         link.title = url.href;
-
-        if (!isImage) {
-            link.textContent = rawUrl;
-            return link;
-        }
+        link.dataset.externalImageUrl = url.href;
+        link.dataset.externalImageRaw = rawUrl;
 
         const img = document.createElement('img');
         img.className = 'ac-image-preview';
@@ -1906,6 +2081,110 @@
 
         link.appendChild(img);
         return link;
+    }
+
+    function createDeferredImageNode(rawUrl, url) {
+        const wrap = el('span', 'ac-image-deferred');
+        wrap.dataset.externalImageUrl = url.href;
+        wrap.dataset.externalImageRaw = rawUrl;
+
+        const link = el('a', 'ac-link', rawUrl);
+        link.href = url.href;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.referrerPolicy = 'no-referrer';
+        link.title = url.href;
+
+        const load = el('button', 'ac-load-image', 'Load image');
+        load.type = 'button';
+        load.title = 'Load this image from the external host';
+
+        load.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+
+            // This is the first point where the browser requests the image when
+            // automatic external previews are disabled.
+            const preview = createExternalImagePreviewNode(rawUrl, url);
+            wrap.replaceWith(preview);
+        });
+
+        wrap.append(link, load);
+        return wrap;
+    }
+
+    function createHttpsLinkNode(rawUrl, forceImagePreview = false) {
+        let url;
+        try {
+            url = new URL(rawUrl);
+        } catch (_) {
+            return null;
+        }
+
+        if (url.protocol !== 'https:') return null;
+
+        const isImage = DIRECT_IMAGE_EXTENSIONS.test(url.pathname);
+
+        if (!isImage) {
+            const link = el('a', 'ac-link', rawUrl);
+            link.href = url.href;
+            link.target = '_blank';
+            link.rel = 'noopener noreferrer';
+            link.referrerPolicy = 'no-referrer';
+            link.title = url.href;
+            return link;
+        }
+
+        if (!forceImagePreview && !state.externalImagePreviews) {
+            return createDeferredImageNode(rawUrl, url);
+        }
+
+        return createExternalImagePreviewNode(rawUrl, url);
+    }
+
+    function refreshExternalImagePreviewNodes() {
+        if (!ui.body) return;
+
+        if (state.externalImagePreviews) {
+            for (const deferred of [...ui.body.querySelectorAll('.ac-image-deferred')]) {
+                const href = String(deferred.dataset.externalImageUrl || '');
+                const raw = String(deferred.dataset.externalImageRaw || href);
+                if (!href) continue;
+
+                try {
+                    deferred.replaceWith(
+                        createExternalImagePreviewNode(raw, new URL(href))
+                    );
+                } catch (_) {}
+            }
+            return;
+        }
+
+        for (const preview of [...ui.body.querySelectorAll('.ac-image-link[data-external-image-url]')]) {
+            const href = String(preview.dataset.externalImageUrl || preview.href || '');
+            const raw = String(preview.dataset.externalImageRaw || href);
+            if (!href) continue;
+
+            try {
+                preview.replaceWith(
+                    createDeferredImageNode(raw, new URL(href))
+                );
+            } catch (_) {}
+        }
+    }
+
+    function applyExternalImagePreviewSetting(enabled, persist = true) {
+        state.externalImagePreviews = Boolean(enabled);
+
+        if (ui.imagePreviewSelect) {
+            ui.imagePreviewSelect.value = state.externalImagePreviews ? 'on' : 'off';
+        }
+
+        if (persist) {
+            GM_setValue(IMAGE_PREVIEW_KEY, state.externalImagePreviews);
+        }
+
+        refreshExternalImagePreviewNodes();
     }
 
     function appendRichText(parent, value) {
@@ -2310,7 +2589,18 @@
             node.classList.add('ac-deleted');
             const body = node.querySelector('.ac-text');
             if (body) body.replaceChildren(el('span', 'ac-deleted-text', '[message removed by moderator]'));
-            node.querySelectorAll('.ac-mod-delete').forEach(button => button.remove());
+            node.querySelectorAll('.ac-mod-delete, .ac-reply-button').forEach(button => button.remove());
+        }
+
+        for (const ref of ui.body?.querySelectorAll('.ac-reply-ref') || []) {
+            if (String(ref.dataset.replyToMessageId || '') !== id) continue;
+            ref.classList.add('ac-reply-missing');
+            ref.disabled = true;
+            ref.replaceChildren(document.createTextNode('Replying to deleted message'));
+        }
+
+        if (String(state.replyingTo?.messageId || '') === id) {
+            clearReplyTarget();
         }
     }
 
@@ -2330,6 +2620,177 @@
         } catch (err) {
             addSystem(`Could not delete message: ${err.message}`, true);
         }
+    }
+
+    function encodeMessageEnvelope(text, reply = null) {
+        if (!reply?.messageId) return text;
+
+        return MESSAGE_ENVELOPE_PREFIX + JSON.stringify({
+            v: 1,
+            text,
+            reply: {
+                message_id: String(reply.messageId),
+                seq: Math.max(0, Number(reply.seq || 0)),
+                author: String(reply.author || 'Unknown user').slice(0, 64),
+            },
+        });
+    }
+
+    function decodeMessageEnvelope(value) {
+        const raw = String(value || '');
+        if (!raw.startsWith(MESSAGE_ENVELOPE_PREFIX)) {
+            return { text: raw, reply: null };
+        }
+
+        try {
+            const parsed = JSON.parse(raw.slice(MESSAGE_ENVELOPE_PREFIX.length));
+            if (Number(parsed?.v) !== 1 || typeof parsed?.text !== 'string') {
+                return { text: raw, reply: null };
+            }
+
+            const reply = parsed?.reply;
+            const normalizedReply =
+                reply && String(reply.message_id || '')
+                    ? {
+                        messageId: String(reply.message_id),
+                        seq: Math.max(0, Number(reply.seq || 0)),
+                        author: String(reply.author || 'Unknown user').slice(0, 64),
+                    }
+                    : null;
+
+            return {
+                text: parsed.text,
+                reply: normalizedReply,
+            };
+        } catch (_) {
+            // Treat malformed/unknown envelopes as ordinary plaintext instead of
+            // losing the message.
+            return { text: raw, reply: null };
+        }
+    }
+
+    function findRenderedMessage(messageId) {
+        const wanted = String(messageId || '');
+        if (!wanted || !ui.body) return null;
+
+        for (const node of ui.body.querySelectorAll('.ac-msg')) {
+            if (String(node.dataset.messageId || '') === wanted) return node;
+        }
+        return null;
+    }
+
+    function updateReplyComposer() {
+        const target = state.replyingTo;
+        if (!ui.replyCompose || !ui.replyComposeTarget) return;
+
+        ui.panel?.classList.toggle('ac-has-reply', Boolean(target));
+
+        if (!target) {
+            ui.replyCompose.classList.remove('ac-show');
+            ui.replyComposeTarget.replaceChildren();
+            return;
+        }
+
+        ui.replyComposeTarget.replaceChildren(
+            document.createTextNode('Replying to '),
+            el('strong', '', target.author || 'Unknown user')
+        );
+        ui.replyCompose.classList.add('ac-show');
+    }
+
+    function clearReplyTarget() {
+        state.replyingTo = null;
+        updateReplyComposer();
+    }
+
+    function setReplyTarget(msg) {
+        if (!msg?.message_id) return;
+
+        state.replyingTo = {
+            messageId: String(msg.message_id),
+            seq: Math.max(0, Number(msg.seq || 0)),
+            author: String(msg.sender_name || 'Unknown user').slice(0, 64),
+        };
+
+        updateReplyComposer();
+        ui.textarea?.focus();
+    }
+
+    async function jumpToMessage(messageId, targetSeq = 0) {
+        const wanted = String(messageId || '');
+        if (!wanted) return;
+
+        let node = findRenderedMessage(wanted);
+        let pages = 0;
+        const seq = Math.max(0, Number(targetSeq || 0));
+
+        // Keep history contiguous while looking backwards. Regular scrolling still
+        // stops at HISTORY_MAX_LOADED; an explicit reply jump may go further.
+        while (
+            !node &&
+            seq > 0 &&
+            state.oldestHistorySeq > 0 &&
+            seq < state.oldestHistorySeq &&
+            !state.historyServerExhausted &&
+            pages < REPLY_JUMP_MAX_PAGES
+        ) {
+            const loaded = await loadOlderHistory(true);
+            pages += 1;
+            if (!loaded) break;
+            node = findRenderedMessage(wanted);
+        }
+
+        node = node || findRenderedMessage(wanted);
+
+        if (!node) {
+            addSystem('Original reply message is outside the available loaded history.');
+            return;
+        }
+
+        node.scrollIntoView({
+            behavior: 'smooth',
+            block: 'center',
+        });
+
+        // Restart the one-second highlight even if the same reply is clicked twice.
+        node.classList.remove('ac-reply-target-highlight');
+        void node.offsetWidth;
+        node.classList.add('ac-reply-target-highlight');
+
+        setTimeout(() => {
+            node.classList.remove('ac-reply-target-highlight');
+        }, 1000);
+    }
+
+    function buildReplyReference(reply) {
+        if (!reply?.messageId) return null;
+
+        const deleted = state.deletedMessageIds.has(String(reply.messageId));
+        const ref = el(
+            'button',
+            `ac-reply-ref${deleted ? ' ac-reply-missing' : ''}`
+        );
+        ref.type = 'button';
+        ref.dataset.replyToMessageId = String(reply.messageId);
+        ref.dataset.replyToSeq = String(reply.seq || 0);
+
+        if (deleted) {
+            ref.textContent = 'Replying to deleted message';
+            ref.disabled = true;
+            return ref;
+        }
+
+        ref.append(
+            document.createTextNode('Replying to '),
+            el('span', 'ac-reply-author', reply.author || 'Unknown user')
+        );
+        ref.title = 'Jump to replied-to message';
+
+        ref.addEventListener('click', () => {
+            jumpToMessage(reply.messageId, reply.seq);
+        });
+
+        return ref;
     }
 
     function buildPanel() {
@@ -2375,9 +2836,46 @@
         }
 
         themeSelect.value = state.theme;
-        settings.append(settingsTitle, themeLabel, themeSelect);
+
+        const imagePreviewLabel = el(
+            'div',
+            'ac-settings-label ac-settings-label-spaced',
+            'External image previews'
+        );
+        const imagePreviewSelect = document.createElement('select');
+        imagePreviewSelect.className = 'ac-image-preview-select';
+
+        for (const [value, label] of [
+            ['on', 'On'],
+            ['off', 'Off']
+        ]) {
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = label;
+            imagePreviewSelect.appendChild(option);
+        }
+
+        imagePreviewSelect.value = state.externalImagePreviews ? 'on' : 'off';
+
+        settings.append(
+            settingsTitle,
+            themeLabel,
+            themeSelect,
+            imagePreviewLabel,
+            imagePreviewSelect
+        );
 
         const composer = el('div', 'ac-composer');
+
+        const replyCompose = el('div', 'ac-reply-compose');
+        const replyComposeTarget = el('button', 'ac-reply-compose-target');
+        replyComposeTarget.type = 'button';
+        replyComposeTarget.title = 'Jump to replied-to message';
+        const replyCancel = el('button', 'ac-reply-cancel', '×');
+        replyCancel.type = 'button';
+        replyCancel.title = 'Cancel reply';
+        replyCompose.append(replyComposeTarget, replyCancel);
+
         const textarea = document.createElement('textarea');
         textarea.placeholder = 'Type your message here...';
         textarea.maxLength = state.maxMessageChars;
@@ -2389,7 +2887,7 @@
         const send = el('button', 'ac-send', 'Send');
         send.type = 'button'; send.disabled = true;
 
-        composer.append(textarea, emojiButton, send);
+        composer.append(replyCompose, textarea, emojiButton, send);
 
         const mentionMenu = el('div', 'ac-mention-menu');
 
@@ -2513,7 +3011,7 @@
         // pair it with an unrelated text/search field from Torn or another userscript.
         panel.append(header, status, body, newMessages, composer, mentionMenu, emojiPicker, settings, manage);
         document.body.appendChild(panel);
-        ui = { panel, header, title, online, manageButton, settingsButton, mobileSizeButton, min, close, status, body, newMessages, textarea, mentionMenu, emojiButton, emojiPicker, send, login, input, loginButton, loginError, settings, themeSelect, manage, manageRole, manageRefresh, manageClose, manageSearch, manageStatus, manageMembers, auditList };
+        ui = { panel, header, title, online, manageButton, settingsButton, mobileSizeButton, min, close, status, body, newMessages, composer, replyCompose, replyComposeTarget, replyCancel, textarea, mentionMenu, emojiButton, emojiPicker, send, login, input, loginButton, loginError, settings, themeSelect, imagePreviewSelect, manage, manageRole, manageRefresh, manageClose, manageSearch, manageStatus, manageMembers, auditList };
         refreshManageVisibility();
 
         applyTheme(state.theme, false);
@@ -2590,6 +3088,13 @@
             applyTheme(themeSelect.value, true);
         });
 
+        imagePreviewSelect.addEventListener('change', () => {
+            applyExternalImagePreviewSetting(
+                imagePreviewSelect.value === 'on',
+                true
+            );
+        });
+
         min.addEventListener('click', (e) => {
             e.stopPropagation();
             saveCurrentPanelGeometry();
@@ -2638,6 +3143,16 @@
         newMessages.addEventListener('click', () => {
             scrollBottom();
             clearSharedUnread(state.lastCursor);
+        });
+
+        replyComposeTarget.addEventListener('click', () => {
+            if (!state.replyingTo) return;
+            jumpToMessage(state.replyingTo.messageId, state.replyingTo.seq);
+        });
+
+        replyCancel.addEventListener('click', () => {
+            clearReplyTarget();
+            textarea.focus();
         });
 
         send.addEventListener('click', sendMessage);
@@ -3405,6 +3920,8 @@
         state.oldestHistorySeq = 0;
         state.historyLoading = false;
         state.historyExhausted = false;
+        state.historyServerExhausted = false;
+        state.replyingTo = null;
         state.mentionDirectory = { users: [], factions: [] };
         state.me = null;
         state.staffRoles = {};
@@ -3519,8 +4036,10 @@
             state.oldestHistorySeq = initialHistory.length
                 ? Number(initialHistory[0].seq || 0)
                 : 0;
+            state.historyServerExhausted =
+                initialHistory.length < HISTORY_PAGE_SIZE;
             state.historyExhausted =
-                initialHistory.length < HISTORY_PAGE_SIZE ||
+                state.historyServerExhausted ||
                 state.historyLoaded >= HISTORY_MAX_LOADED;
 
             for (const msg of initialHistory) {
@@ -3596,22 +4115,27 @@
         return true;
     }
 
-    async function loadOlderHistory() {
-        if (!state.token || !state.cryptoKey) return;
-        if (state.historyLoading || state.historyExhausted) return;
-        if (state.historyLoaded >= HISTORY_MAX_LOADED) {
+    async function loadOlderHistory(forceBeyondCap = false) {
+        if (!state.token || !state.cryptoKey) return false;
+        if (state.historyLoading || state.historyServerExhausted) return false;
+
+        if (!forceBeyondCap && state.historyLoaded >= HISTORY_MAX_LOADED) {
             state.historyExhausted = true;
-            return;
+            return false;
         }
+
         if (!state.oldestHistorySeq) {
+            state.historyServerExhausted = true;
             state.historyExhausted = true;
-            return;
+            return false;
         }
 
         state.historyLoading = true;
 
         try {
-            const remaining = HISTORY_MAX_LOADED - state.historyLoaded;
+            const remaining = forceBeyondCap
+                ? HISTORY_PAGE_SIZE
+                : Math.max(1, HISTORY_MAX_LOADED - state.historyLoaded);
             const limit = Math.min(HISTORY_PAGE_SIZE, remaining);
             const before = state.oldestHistorySeq;
 
@@ -3634,8 +4158,9 @@
 
             const messages = data.messages || [];
             if (!messages.length) {
+                state.historyServerExhausted = true;
                 state.historyExhausted = true;
-                return;
+                return false;
             }
 
             // renderEncryptedMessage prepends one node at a time. Walk newest-to-oldest
@@ -3648,17 +4173,23 @@
             state.historyLoaded += messages.length;
             state.oldestHistorySeq = Number(messages[0]?.seq || state.oldestHistorySeq);
 
-            if (
+            const serverDone =
                 messages.length < limit ||
-                state.historyLoaded >= HISTORY_MAX_LOADED ||
-                data.has_more === false
-            ) {
-                state.historyExhausted = true;
+                data.has_more === false;
+
+            if (serverDone) {
+                state.historyServerExhausted = true;
             }
+
+            state.historyExhausted =
+                state.historyServerExhausted ||
+                (!forceBeyondCap && state.historyLoaded >= HISTORY_MAX_LOADED);
 
             // Keep the same message under the user's eyes after prepending history.
             const addedHeight = ui.body.scrollHeight - oldScrollHeight;
             ui.body.scrollTop = oldScrollTop + addedHeight;
+
+            return true;
         } catch (err) {
             if (err.status === 401 || err.status === 403) {
                 logoutLocal();
@@ -3668,6 +4199,7 @@
                         : 'Session expired. Verify again.'
                 );
             }
+            return false;
         } finally {
             state.historyLoading = false;
         }
@@ -3802,13 +4334,15 @@
 
         if (!text) return;
 
+        const encryptedPlaintext = encodeMessageEnvelope(text, state.replyingTo);
+
         ui.textarea.value = '';
         closeMentionMenu();
         ui.emojiPicker?.classList.remove('ac-show');
         ui.send.disabled = true;
 
         try {
-            const encrypted = await encryptText(text);
+            const encrypted = await encryptText(encryptedPlaintext);
 
             const result = await api('/api/messages', {
                 method: 'POST',
@@ -3831,6 +4365,7 @@
             // Let the immediate poll render the accepted message in sequence order.
             // This avoids placing our own seq=102 above an unseen seq=101 message
             // that was sent by somebody else just before our POST completed.
+            clearReplyTarget();
             schedulePoll(0);
         } catch (err) {
             if (err.status === 409) {
@@ -3905,9 +4440,16 @@
 
         const deleted = Boolean(msg?.deleted) || state.deletedMessageIds.has(String(msg?.message_id || ''));
         let text = '';
+        let reply = null;
         if (!deleted) {
-            try { text = await decryptMessage(msg); }
-            catch (_) { text = '[Unable to decrypt this message]'; }
+            try {
+                const decrypted = await decryptMessage(msg);
+                const payload = decodeMessageEnvelope(decrypted);
+                text = payload.text;
+                reply = payload.reply;
+            } catch (_) {
+                text = '[Unable to decrypt this message]';
+            }
         }
 
         const wrap = el('div', `ac-msg${deleted ? ' ac-deleted' : ''}`);
@@ -3965,6 +4507,19 @@
 
         meta.append(name, faction, stamp);
 
+        if (!deleted) {
+            const replyButton = el('button', 'ac-reply-button', '↩');
+            replyButton.type = 'button';
+            replyButton.title = `Reply to ${msg.sender_name || 'message'}`;
+            replyButton.setAttribute('aria-label', replyButton.title);
+            replyButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                setReplyTarget(msg);
+            });
+            meta.appendChild(replyButton);
+        }
+
         if (!deleted && isStaffRole() && canModerateTarget(msg.sender_id)) {
             const deleteButton = el('button', 'ac-mod-delete', '×');
             deleteButton.type = 'button';
@@ -3977,7 +4532,14 @@
             meta.appendChild(deleteButton);
         }
 
-        wrap.append(meta, body);
+        wrap.appendChild(meta);
+
+        if (!deleted && reply?.messageId) {
+            const replyRef = buildReplyReference(reply);
+            if (replyRef) wrap.appendChild(replyRef);
+        }
+
+        wrap.appendChild(body);
 
         if (prepend) {
             ui.body.insertBefore(wrap, ui.body.firstChild);
@@ -4160,6 +4722,11 @@
         GM_addValueChangeListener(THEME_KEY, (_name, _oldValue, newValue, remote) => {
             if (!remote) return;
             applyTheme(newValue, false);
+        });
+
+        GM_addValueChangeListener(IMAGE_PREVIEW_KEY, (_name, _oldValue, newValue, remote) => {
+            if (!remote) return;
+            applyExternalImagePreviewSetting(newValue !== false, false);
         });
 
         GM_addValueChangeListener(UPDATE_AVAILABLE_KEY, (_name, _oldValue, newValue, remote) => {
