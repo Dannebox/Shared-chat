@@ -3,7 +3,7 @@
 // @namespace    almanac.shared.chat
 // @updateURL   https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
 // @downloadURL https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
-// @version      0.1.67
+// @version      0.1.69
 // @description  Secure shared chat for approved Torn factions using CSP-safe HTTP polling; does not scrape Torn pages.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -1215,6 +1215,25 @@
                 background: var(--ac-input-bg);
                 color: var(--ac-text);
                 outline: none;
+            }
+
+            #${PANEL_ID} .ac-signout {
+                width: 100%;
+                margin-top: 12px;
+                padding: 7px;
+                box-sizing: border-box;
+                border: 1px solid rgba(229, 141, 141, .65);
+                border-radius: 3px;
+                background: rgba(120, 35, 35, .18);
+                color: #ffb1b1;
+                cursor: pointer;
+                font: inherit;
+                font-weight: 700;
+            }
+
+            #${PANEL_ID} .ac-signout:hover {
+                background: rgba(140, 40, 40, .28);
+                color: #ffd0d0;
             }
 
             #${PANEL_ID} .ac-image-deferred {
@@ -2857,12 +2876,17 @@
 
         imagePreviewSelect.value = state.externalImagePreviews ? 'on' : 'off';
 
+        const signOutButton = el('button', 'ac-signout', 'Sign out');
+        signOutButton.type = 'button';
+        signOutButton.title = 'Sign out of FLUX Chat on this browser';
+
         settings.append(
             settingsTitle,
             themeLabel,
             themeSelect,
             imagePreviewLabel,
-            imagePreviewSelect
+            imagePreviewSelect,
+            signOutButton
         );
 
         const composer = el('div', 'ac-composer');
@@ -3011,7 +3035,7 @@
         // pair it with an unrelated text/search field from Torn or another userscript.
         panel.append(header, status, body, newMessages, composer, mentionMenu, emojiPicker, settings, manage);
         document.body.appendChild(panel);
-        ui = { panel, header, title, online, manageButton, settingsButton, mobileSizeButton, min, close, status, body, newMessages, composer, replyCompose, replyComposeTarget, replyCancel, textarea, mentionMenu, emojiButton, emojiPicker, send, login, input, loginButton, loginError, settings, themeSelect, imagePreviewSelect, manage, manageRole, manageRefresh, manageClose, manageSearch, manageStatus, manageMembers, auditList };
+        ui = { panel, header, title, online, manageButton, settingsButton, mobileSizeButton, min, close, status, body, newMessages, composer, replyCompose, replyComposeTarget, replyCancel, textarea, mentionMenu, emojiButton, emojiPicker, send, login, input, loginButton, loginError, settings, themeSelect, imagePreviewSelect, signOutButton, manage, manageRole, manageRefresh, manageClose, manageSearch, manageStatus, manageMembers, auditList };
         refreshManageVisibility();
 
         applyTheme(state.theme, false);
@@ -3093,6 +3117,12 @@
                 imagePreviewSelect.value === 'on',
                 true
             );
+        });
+
+        signOutButton.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            signOutExplicitly();
         });
 
         min.addEventListener('click', (e) => {
@@ -3904,6 +3934,37 @@
         // on the page. The user can click the API-key field when they need it.
     }
 
+    function signOutExplicitly() {
+        const confirmed = window.confirm(
+            'Sign out of FLUX Chat on this browser?\n\nYou will need to verify your Torn API key again to reconnect.'
+        );
+        if (!confirmed) return;
+
+        // Explicit sign-out is intentionally stronger than automatic logoutLocal().
+        // Tampermonkey storage is shared between Torn tabs, so clear the current
+        // shared credentials even if this tab happens to hold an older in-memory
+        // token after a refresh rotation.
+        GM_deleteValue(TOKEN_KEY);
+        GM_deleteValue(REFRESH_TOKEN_KEY);
+        GM_deleteValue(REFRESH_LOCK_KEY);
+        GM_deleteValue(NOTIFY_LEADER_KEY);
+
+        logoutLocal();
+
+        // Remove decrypted/typed chat content from the visible UI when the user
+        // explicitly signs out. Theme, geometry and other preferences are kept.
+        if (ui.body) ui.body.replaceChildren();
+        if (ui.textarea) ui.textarea.value = '';
+        if (ui.newMessages) ui.newMessages.classList.remove('ac-show');
+        clearReplyTarget();
+
+        if (ui.settings) ui.settings.classList.remove('ac-show');
+        if (ui.manage) ui.manage.classList.remove('ac-show');
+
+        showLogin('Signed out. Verify your Torn API key to reconnect.');
+    }
+
+
     function logoutLocal() {
         const oldToken = state.token;
         const oldRefresh = state.refreshToken;
@@ -4666,10 +4727,18 @@
 
 
     function toB64(bytes) {
+        // Firefox/WebExtension compatibility:
+        // Uint8Array views backed by an ArrayBuffer returned across extension/page
+        // compartments can throw:
+        //   Permission denied to access property "constructor"
+        // when methods such as subarray()/slice() are called.
+        //
+        // Direct indexed reads avoid that cross-compartment typed-array method path.
+        // Chat payloads are small (max message size is bounded), so the simple loop
+        // is also cheap enough here.
         let binary = '';
-        const chunk = 0x8000;
-        for (let i = 0; i < bytes.length; i += chunk) {
-            binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+        for (let i = 0; i < bytes.length; i++) {
+            binary += String.fromCharCode(bytes[i]);
         }
         return btoa(binary);
     }
