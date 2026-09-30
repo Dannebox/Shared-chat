@@ -3,7 +3,7 @@
 // @namespace    almanac.shared.chat
 // @updateURL   https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
 // @downloadURL https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
-// @version      0.1.69
+// @version      0.1.70
 // @description  Secure shared chat for approved Torn factions using CSP-safe HTTP polling; does not scrape Torn pages.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -3262,65 +3262,100 @@
         updateMobileViewport();
     }
 
-    function installLauncher() {
-        const factionButton = document.querySelector(
-            '[id^="channel_panel_button:faction-"]'
-        );
+    // Keep our nodes and listeners even if React detaches the native chat tree.
+    let launcherWrapper = null;
 
-        if (!factionButton) return;
-
-        const factionWrapper = factionButton.parentElement;
+    function findFactionLauncherHost() {
+        const factionButton =
+            document.querySelector('#chatRoot [id="chat_panel_button:faction"]') ||
+            document.querySelector('[id^="chat_panel_button:faction"]') ||
+            document.querySelector('[id^="channel_panel_button:faction-"]');
+        const factionWrapper = factionButton?.parentElement;
         const controlsContainer = factionWrapper?.parentElement;
 
-        if (!factionWrapper || !controlsContainer) return;
+        if (factionWrapper && controlsContainer) {
+            return { controlsContainer, factionWrapper };
+        }
 
-        let launcher = document.getElementById(LAUNCHER_ID);
-
-        // Already installed correctly in its own Torn-style wrapper.
+        // A Chat 3.1 panel is also sufficient evidence when its launcher has not
+        // mounted yet. Keep FLUX outside React while Torn minimizes/rebuilds it.
         if (
-            launcher &&
-            launcher.parentElement?.dataset?.allianceWrapper === '1' &&
-            launcher.parentElement?.parentElement === controlsContainer
+            document.querySelector('#chatRoot #faction') ||
+            document.querySelector('#chatRoot [id^="faction-"]') ||
+            launcherWrapper
         ) {
-            // Torn can rebuild surrounding React UI without changing our JS state.
-            // Re-apply the persisted badge every time we verify the launcher.
+            return { controlsContainer: document.body, factionWrapper: null };
+        }
+
+        return null;
+    }
+
+    function placeLauncher(wrapper, host) {
+        const { controlsContainer, factionWrapper } = host;
+        const floating = !factionWrapper;
+        const rect = factionWrapper?.getBoundingClientRect();
+        const slotStyle = factionWrapper ? window.getComputedStyle(factionWrapper) : null;
+        const width = rect?.width > 0 ? rect.width : 40;
+        const height = rect?.height > 0 ? rect.height : 40;
+
+        // Own the slot styling; discovery and layout do not depend on Torn's
+        // generated class names or copy native IDs/React drag metadata.
+        wrapper.classList.toggle('ac-launcher-floating', floating);
+        wrapper.style.display = 'block';
+        wrapper.style.boxSizing = 'border-box';
+        wrapper.style.flex = '0 0 auto';
+        wrapper.style.width = `${width}px`;
+        wrapper.style.minWidth = `${width}px`;
+        wrapper.style.height = `${height}px`;
+        wrapper.style.marginTop = slotStyle?.marginTop || '0px';
+        wrapper.style.marginRight = slotStyle?.marginRight || '0px';
+        wrapper.style.marginBottom = slotStyle?.marginBottom || '0px';
+        wrapper.style.marginLeft = slotStyle?.marginLeft || '0px';
+        wrapper.style.alignSelf = slotStyle?.alignSelf || 'auto';
+        wrapper.style.position = 'relative';
+        wrapper.style.zIndex = '2147483646';
+        wrapper.style.pointerEvents = 'auto';
+
+        if (
+            wrapper.parentElement !== controlsContainer ||
+            (factionWrapper && wrapper.nextElementSibling !== factionWrapper)
+        ) {
+            controlsContainer.insertBefore(wrapper, factionWrapper);
+        }
+    }
+
+    function installLauncher() {
+        const host = findFactionLauncherHost();
+        if (!host?.controlsContainer) return;
+
+        let launcher = launcherWrapper?.querySelector(`#${LAUNCHER_ID}`);
+        if (launcher) {
+            placeLauncher(launcherWrapper, host);
             updateBadge();
             return;
         }
 
-        // Remove any previous/bad installation.
-        if (launcher) {
-            const oldWrapper = launcher.parentElement;
-            if (oldWrapper?.dataset?.allianceWrapper === '1') {
-                oldWrapper.remove();
-            } else {
-                launcher.remove();
-            }
+        // Remove a partial/previous installation before creating one button.
+        launcherWrapper?.remove();
+        launcher = document.getElementById(LAUNCHER_ID);
+        if (launcher?.parentElement?.dataset?.allianceWrapper === '1') {
+            launcher.parentElement.remove();
+        } else {
+            launcher?.remove();
         }
 
-        // Create a new sibling wrapper using Torn's own wrapper shell.
-        const wrapper = factionWrapper.cloneNode(false);
-        wrapper.removeAttribute('data-alliance-launcher-host');
+        const wrapper = el('div');
         wrapper.dataset.allianceWrapper = '1';
-
-        // Keep Torn's layout slot, but make our own click surface sit above its DnD layers.
-        wrapper.style.transition = factionWrapper.style.transition || 'transform linear';
-        wrapper.style.position = 'relative';
-        wrapper.style.zIndex = '2147483646';
-        wrapper.style.pointerEvents = 'auto';
+        launcherWrapper = wrapper;
 
         const button = el('button');
         button.id = LAUNCHER_ID;
         button.type = 'button';
         button.title = 'FLUX Chat';
+        button.setAttribute('data-prevent-flyout-swipe', 'true');
 
         // Absolute positioning keeps the Torn flex slot intact while ensuring the
         // clickable surface is above Torn's drag/drop overlays.
-        const factionRect = factionWrapper.getBoundingClientRect();
-        wrapper.style.width = `${factionRect.width}px`;
-        wrapper.style.minWidth = `${factionRect.width}px`;
-        wrapper.style.height = `${factionRect.height}px`;
-
         button.style.position = 'absolute';
         button.style.width = '40px';
         button.style.height = '40px';
@@ -3377,8 +3412,9 @@
 
         wrapper.appendChild(button);
 
-        // Insert FLUX as its own flex item immediately before Faction.
-        controlsContainer.insertBefore(wrapper, factionWrapper);
+        // Insert before the native faction control, or use the fixed fallback
+        // while only the panel exists or the native chat root is rebuilding.
+        placeLauncher(wrapper, host);
 
         // A newly recreated Torn launcher starts with a hidden "0" badge. Restore
         // the actual shared unread state immediately instead of waiting for the
@@ -3387,14 +3423,16 @@
     }
 
     function positionPanelNearTornChat() {
-        if (!ui.panel || ui.panel.dataset.dragged === '1') return;
+        if (!ui.panel || isMobileLayout() || ui.panel.dataset.dragged === '1') return;
 
         const saved = loadDesktopGeometry();
         if (saved) {
             restoreDesktopGeometry(saved);
             return;
         }
-        const tornWindow = document.querySelector('#chatRoot [id^="faction-"]');
+        const tornWindow =
+            document.querySelector('#chatRoot #faction') ||
+            document.querySelector('#chatRoot [id^="faction-"]');
         if (tornWindow) {
             const r = tornWindow.getBoundingClientRect();
             const left = Math.max(8, r.left - 308);
@@ -4757,10 +4795,12 @@
 
         if (state.mentionUnread > 0) {
             const mentionCount = state.mentionUnread > 99 ? '99+' : String(state.mentionUnread);
-            badge.textContent = `@${mentionCount}`;
+            const text = `@${mentionCount}`;
+            if (badge.textContent !== text) badge.textContent = text;
             badge.classList.add('ac-mention-badge');
         } else {
-            badge.textContent = state.unread > 99 ? '99+' : String(state.unread);
+            const text = state.unread > 99 ? '99+' : String(state.unread);
+            if (badge.textContent !== text) badge.textContent = text;
             badge.classList.remove('ac-mention-badge');
         }
 
@@ -4876,7 +4916,12 @@
             installLauncher();
         }, 250);
     });
-    observer.observe(document.documentElement, { childList: true, subtree: true });
+    observer.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['id']
+    });
 
     if (window.visualViewport) {
         window.visualViewport.addEventListener('resize', () => {
@@ -4889,7 +4934,10 @@
 
     const mobileMediaQuery = window.matchMedia(MOBILE_MEDIA);
     if (typeof mobileMediaQuery.addEventListener === 'function') {
-        mobileMediaQuery.addEventListener('change', () => updateMobileViewport());
+        mobileMediaQuery.addEventListener('change', () => {
+            updateMobileViewport();
+            installLauncher();
+        });
     }
 
     const adjustForMobileKeyboard = () => {
@@ -4950,6 +4998,7 @@
 
     let desktopViewportClampTimer = null;
     window.addEventListener('resize', () => {
+        installLauncher();
         if (isMobileLayout()) return;
 
         clearTimeout(desktopViewportClampTimer);
