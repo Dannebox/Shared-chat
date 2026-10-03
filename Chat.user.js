@@ -3,7 +3,7 @@
 // @namespace    almanac.shared.chat
 // @updateURL   https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
 // @downloadURL https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
-// @version      0.1.70
+// @version      0.1.71
 // @description  Secure shared chat for approved Torn factions using CSP-safe HTTP polling; does not scrape Torn pages.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -1409,6 +1409,15 @@
             }
             .ac-launcher-floating {
                 position: fixed !important; right: 5px; bottom: 120px; z-index: 999999;
+            }
+
+            /* On mobile, FLUX must follow Torn's grouped-chat UI rather than
+               falling back to a detached floating launcher at the right edge. */
+            @media (max-width: 700px) {
+                #${LAUNCHER_ID}.ac-launcher-floating,
+                .ac-launcher-floating #${LAUNCHER_ID} {
+                    display: none !important;
+                }
             }
         `;
         document.head.appendChild(style);
@@ -3262,100 +3271,141 @@
         updateMobileViewport();
     }
 
-    // Keep our nodes and listeners even if React detaches the native chat tree.
-    let launcherWrapper = null;
+    function isElementVisible(element) {
+        if (!element || !element.isConnected) return false;
 
-    function findFactionLauncherHost() {
-        const factionButton =
-            document.querySelector('#chatRoot [id="chat_panel_button:faction"]') ||
-            document.querySelector('[id^="chat_panel_button:faction"]') ||
-            document.querySelector('[id^="channel_panel_button:faction-"]');
-        const factionWrapper = factionButton?.parentElement;
-        const controlsContainer = factionWrapper?.parentElement;
+        const rect = element.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return false;
 
-        if (factionWrapper && controlsContainer) {
-            return { controlsContainer, factionWrapper };
-        }
-
-        // A Chat 3.1 panel is also sufficient evidence when its launcher has not
-        // mounted yet. Keep FLUX outside React while Torn minimizes/rebuilds it.
-        if (
-            document.querySelector('#chatRoot #faction') ||
-            document.querySelector('#chatRoot [id^="faction-"]') ||
-            launcherWrapper
-        ) {
-            return { controlsContainer: document.body, factionWrapper: null };
-        }
-
-        return null;
+        const style = window.getComputedStyle(element);
+        return style.display !== 'none' && style.visibility !== 'hidden';
     }
 
-    function placeLauncher(wrapper, host) {
-        const { controlsContainer, factionWrapper } = host;
-        const floating = !factionWrapper;
-        const rect = factionWrapper?.getBoundingClientRect();
-        const slotStyle = factionWrapper ? window.getComputedStyle(factionWrapper) : null;
-        const width = rect?.width > 0 ? rect.width : 40;
-        const height = rect?.height > 0 ? rect.height : 40;
+    function removeLauncherNode(launcher = document.getElementById(LAUNCHER_ID)) {
+        if (!launcher) return;
 
-        // Own the slot styling; discovery and layout do not depend on Torn's
-        // generated class names or copy native IDs/React drag metadata.
-        wrapper.classList.toggle('ac-launcher-floating', floating);
-        wrapper.style.display = 'block';
-        wrapper.style.boxSizing = 'border-box';
-        wrapper.style.flex = '0 0 auto';
-        wrapper.style.width = `${width}px`;
-        wrapper.style.minWidth = `${width}px`;
-        wrapper.style.height = `${height}px`;
-        wrapper.style.marginTop = slotStyle?.marginTop || '0px';
-        wrapper.style.marginRight = slotStyle?.marginRight || '0px';
-        wrapper.style.marginBottom = slotStyle?.marginBottom || '0px';
-        wrapper.style.marginLeft = slotStyle?.marginLeft || '0px';
-        wrapper.style.alignSelf = slotStyle?.alignSelf || 'auto';
-        wrapper.style.position = 'relative';
-        wrapper.style.zIndex = '2147483646';
-        wrapper.style.pointerEvents = 'auto';
-
-        if (
-            wrapper.parentElement !== controlsContainer ||
-            (factionWrapper && wrapper.nextElementSibling !== factionWrapper)
-        ) {
-            controlsContainer.insertBefore(wrapper, factionWrapper);
+        const wrapper = launcher.parentElement;
+        if (wrapper?.dataset?.allianceWrapper === '1') {
+            wrapper.remove();
+        } else {
+            launcher.remove();
         }
+    }
+
+    function mobileContainerHasLauncherRoom(controlsContainer) {
+        if (!isMobileLayout()) return true;
+        if (!isElementVisible(controlsContainer)) return false;
+
+        const style = window.getComputedStyle(controlsContainer);
+
+        // Torn's grouped/expanded chat UI may stack or wrap entries. In that
+        // layout an extra launcher does not steal horizontal space from the
+        // compact launcher strip, so it is safe to attach FLUX there.
+        if (style.flexDirection === 'column' || style.flexWrap !== 'nowrap') {
+            return true;
+        }
+
+        const containerRect = controlsContainer.getBoundingClientRect();
+        const gap = Number.parseFloat(style.columnGap || style.gap || '0') || 0;
+        const children = [...controlsContainer.children].filter(child => {
+            if (!(child instanceof HTMLElement)) return false;
+            if (child.dataset?.allianceWrapper === '1') return false;
+            if (!isElementVisible(child)) return false;
+            return true;
+        });
+
+        const usedWidth = children.reduce(
+            (total, child) => total + child.getBoundingClientRect().width,
+            0
+        );
+        const gapsWidth = Math.max(0, children.length - 1) * gap;
+
+        // Our Torn-style wrapper/button occupies roughly one 40px launcher slot.
+        // Keep a small tolerance for borders/subpixel rounding.
+        return usedWidth + gapsWidth + 42 <= containerRect.width + 2;
     }
 
     function installLauncher() {
-        const host = findFactionLauncherHost();
-        if (!host?.controlsContainer) return;
+        // Torn Chat 2.0/3.0 used channel_panel_button:faction-* while
+        // Chat 3.1 uses chat_panel_button:faction. Support both without
+        // depending on Torn's build-hashed CSS class names.
+        const factionButton = document.querySelector(
+            '[id^="channel_panel_button:faction-"], [id^="chat_panel_button:faction"]'
+        );
 
-        let launcher = launcherWrapper?.querySelector(`#${LAUNCHER_ID}`);
-        if (launcher) {
-            placeLauncher(launcherWrapper, host);
+        let launcher = document.getElementById(LAUNCHER_ID);
+
+        // Mobile Chat 3.1 can collapse chat launchers into a grouped menu.
+        // When the faction anchor is absent/hidden, do not recreate FLUX as a
+        // detached floating button. It should disappear with Torn's group and
+        // reappear when that grouped UI is opened again.
+        if (!factionButton || !isElementVisible(factionButton)) {
+            if (isMobileLayout()) removeLauncherNode(launcher);
+            return;
+        }
+
+        const factionWrapper = factionButton.parentElement;
+        const controlsContainer = factionWrapper?.parentElement;
+
+        if (!factionWrapper || !controlsContainer) {
+            if (isMobileLayout()) removeLauncherNode(launcher);
+            return;
+        }
+
+        // In Torn's compact phone strip there may be no room for another icon.
+        // In that state FLUX must remain hidden instead of overflowing/floating
+        // off the right edge. Opening Torn's grouped-chat UI gives us a suitable
+        // container and the observer/click hook will install it there.
+        if (!mobileContainerHasLauncherRoom(controlsContainer)) {
+            removeLauncherNode(launcher);
+            return;
+        }
+
+        launcher = document.getElementById(LAUNCHER_ID);
+
+        // Already installed correctly in its own Torn-style wrapper.
+        if (
+            launcher &&
+            launcher.parentElement?.dataset?.allianceWrapper === '1' &&
+            launcher.parentElement?.parentElement === controlsContainer
+        ) {
+            launcher.classList.remove('ac-launcher-floating');
+            launcher.parentElement.classList.remove('ac-launcher-floating');
             updateBadge();
             return;
         }
 
-        // Remove a partial/previous installation before creating one button.
-        launcherWrapper?.remove();
-        launcher = document.getElementById(LAUNCHER_ID);
-        if (launcher?.parentElement?.dataset?.allianceWrapper === '1') {
-            launcher.parentElement.remove();
-        } else {
-            launcher?.remove();
-        }
+        // Remove any previous/bad installation before moving to Torn's current
+        // launcher/group container.
+        removeLauncherNode(launcher);
 
-        const wrapper = el('div');
+        // Create a new sibling wrapper using Torn's own wrapper shell.
+        const wrapper = factionWrapper.cloneNode(false);
+        wrapper.removeAttribute('data-alliance-launcher-host');
         wrapper.dataset.allianceWrapper = '1';
-        launcherWrapper = wrapper;
+
+        // Keep Torn's layout slot, but make our own click surface sit above its DnD layers.
+        wrapper.style.transition = factionWrapper.style.transition || 'transform linear';
+        wrapper.style.position = 'relative';
+        wrapper.style.zIndex = '2147483646';
+        wrapper.style.pointerEvents = 'auto';
+        wrapper.classList.remove('ac-launcher-floating');
 
         const button = el('button');
         button.id = LAUNCHER_ID;
         button.type = 'button';
         button.title = 'FLUX Chat';
-        button.setAttribute('data-prevent-flyout-swipe', 'true');
+        button.classList.remove('ac-launcher-floating');
 
         // Absolute positioning keeps the Torn flex slot intact while ensuring the
         // clickable surface is above Torn's drag/drop overlays.
+        const factionRect = factionWrapper.getBoundingClientRect();
+        const slotWidth = Math.max(40, factionRect.width || 40);
+        const slotHeight = Math.max(40, factionRect.height || 40);
+        wrapper.style.width = `${slotWidth}px`;
+        wrapper.style.minWidth = `${slotWidth}px`;
+        wrapper.style.height = `${slotHeight}px`;
+
         button.style.position = 'absolute';
         button.style.width = '40px';
         button.style.height = '40px';
@@ -3412,27 +3462,25 @@
 
         wrapper.appendChild(button);
 
-        // Insert before the native faction control, or use the fixed fallback
-        // while only the panel exists or the native chat root is rebuilding.
-        placeLauncher(wrapper, host);
+        // Insert FLUX as its own Torn-style item immediately before Faction.
+        // On mobile this only happens when Torn's current container has space
+        // (normally the grouped-chat menu), never as a floating fallback.
+        controlsContainer.insertBefore(wrapper, factionWrapper);
 
-        // A newly recreated Torn launcher starts with a hidden "0" badge. Restore
-        // the actual shared unread state immediately instead of waiting for the
-        // next incoming message.
         updateBadge();
     }
 
     function positionPanelNearTornChat() {
-        if (!ui.panel || isMobileLayout() || ui.panel.dataset.dragged === '1') return;
+        if (!ui.panel || ui.panel.dataset.dragged === '1') return;
 
         const saved = loadDesktopGeometry();
         if (saved) {
             restoreDesktopGeometry(saved);
             return;
         }
-        const tornWindow =
-            document.querySelector('#chatRoot #faction') ||
-            document.querySelector('#chatRoot [id^="faction-"]');
+        const tornWindow = document.querySelector(
+            '#chatRoot #faction, #chatRoot [id^="faction-"]'
+        );
         if (tornWindow) {
             const r = tornWindow.getBoundingClientRect();
             const left = Math.max(8, r.left - 308);
@@ -4795,12 +4843,10 @@
 
         if (state.mentionUnread > 0) {
             const mentionCount = state.mentionUnread > 99 ? '99+' : String(state.mentionUnread);
-            const text = `@${mentionCount}`;
-            if (badge.textContent !== text) badge.textContent = text;
+            badge.textContent = `@${mentionCount}`;
             badge.classList.add('ac-mention-badge');
         } else {
-            const text = state.unread > 99 ? '99+' : String(state.unread);
-            if (badge.textContent !== text) badge.textContent = text;
+            badge.textContent = state.unread > 99 ? '99+' : String(state.unread);
             badge.classList.remove('ac-mention-badge');
         }
 
@@ -4916,12 +4962,18 @@
             installLauncher();
         }, 250);
     });
-    observer.observe(document.documentElement, {
-        childList: true,
-        subtree: true,
-        attributes: true,
-        attributeFilter: ['id']
-    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+
+    // Torn Chat 3.1 may open/close the mobile grouped-chat UI mainly through
+    // class/state changes. Re-check shortly after clicks inside chatRoot so FLUX
+    // follows the grouped menu even when there was no childList mutation.
+    document.addEventListener('click', (event) => {
+        if (!isMobileLayout()) return;
+        if (!(event.target instanceof Element)) return;
+        if (!event.target.closest('#chatRoot')) return;
+        setTimeout(installLauncher, 80);
+        setTimeout(installLauncher, 300);
+    }, true);
 
     if (window.visualViewport) {
         window.visualViewport.addEventListener('resize', () => {
@@ -4934,10 +4986,7 @@
 
     const mobileMediaQuery = window.matchMedia(MOBILE_MEDIA);
     if (typeof mobileMediaQuery.addEventListener === 'function') {
-        mobileMediaQuery.addEventListener('change', () => {
-            updateMobileViewport();
-            installLauncher();
-        });
+        mobileMediaQuery.addEventListener('change', () => updateMobileViewport());
     }
 
     const adjustForMobileKeyboard = () => {
@@ -4998,7 +5047,6 @@
 
     let desktopViewportClampTimer = null;
     window.addEventListener('resize', () => {
-        installLauncher();
         if (isMobileLayout()) return;
 
         clearTimeout(desktopViewportClampTimer);
