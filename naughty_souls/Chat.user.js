@@ -3,7 +3,7 @@
 // @namespace    naughty.souls.shared.chat
 // @updateURL   https://raw.githubusercontent.com/Dannebox/Shared-chat/main/naughty_souls/Chat.user.js
 // @downloadURL https://raw.githubusercontent.com/Dannebox/Shared-chat/main/naughty_souls/Chat.user.js
-// @version      0.1.1
+// @version      0.1.2
 // @description  Secure shared chat for approved Torn factions using CSP-safe HTTP polling; does not scrape Torn pages.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -67,7 +67,7 @@
     const THEME_ASSETS = {
         'naughty-souls': {
             header: 'https://naughtysouls-chat.shiroshura.com/assets/naughty-souls/header.webp',
-            background: 'https://naughtysouls-chat.shiroshura.com/assets/naughty-souls/background.webp'
+            background: 'https://naughtysouls-chat.shiroshura.com/assets/naughty-souls/background-v0.1.2.webp'
         }
     };
 
@@ -3525,7 +3525,7 @@
         button.style.pointerEvents = 'auto';
         button.style.touchAction = 'manipulation';
 
-        button.append(document.createTextNode('NS'));
+        button.append(document.createTextNode('NaSo'));
 
         const badge = el('span', 'ns-badge', '0');
         button.appendChild(badge);
