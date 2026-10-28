@@ -3,7 +3,7 @@
 // @namespace    naughty.souls.shared.chat
 // @updateURL   https://raw.githubusercontent.com/Dannebox/Shared-chat/main/naughty_souls/Chat.user.js
 // @downloadURL https://raw.githubusercontent.com/Dannebox/Shared-chat/main/naughty_souls/Chat.user.js
-// @version      0.1.0
+// @version      0.1.1
 // @description  Secure shared chat for approved Torn factions using CSP-safe HTTP polling; does not scrape Torn pages.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -65,18 +65,24 @@
     const TAB_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 
     const THEME_ASSETS = {
-        almanac: {
-            header: 'https://naughtysouls-chat.shiroshura.com/assets/almanac/header.webp',
-            background: 'https://naughtysouls-chat.shiroshura.com/assets/almanac/background.webp'
-        },
-
-        flux: {
-            header: 'https://naughtysouls-chat.shiroshura.com/assets/flux/header.webp',
-            background: 'https://naughtysouls-chat.shiroshura.com/assets/flux/background.webp'
+        'naughty-souls': {
+            header: 'https://naughtysouls-chat.shiroshura.com/assets/naughty-souls/header.webp',
+            background: 'https://naughtysouls-chat.shiroshura.com/assets/naughty-souls/background.webp'
         }
     };
 
-    const THEMES = new Set(['default', 'almanac', 'flux']);
+    const THEMES = new Set(['default', 'naughty-souls']);
+
+    function normalizeTheme(theme) {
+        return THEMES.has(theme) ? theme : 'naughty-souls';
+    }
+
+    function loadSavedTheme() {
+        const saved = GM_getValue(THEME_KEY, null);
+        const theme = normalizeTheme(saved);
+        if (saved !== theme) GM_setValue(THEME_KEY, theme);
+        return theme;
+    }
 
     const EMOJI_SHORTCODES = {
         smile: '😄',
@@ -178,7 +184,7 @@
         lastCursor: 0,
         seenMessageIds: new Set(),
         factionNames: {},
-        theme: THEMES.has(GM_getValue(THEME_KEY, 'default')) ? GM_getValue(THEME_KEY, 'default') : 'default',
+        theme: loadSavedTheme(),
         externalImagePreviews: GM_getValue(IMAGE_PREVIEW_KEY, true) !== false,
         updateAvailable: GM_getValue(UPDATE_AVAILABLE_KEY, ''),
         historyLoaded: 0,
@@ -1146,49 +1152,29 @@
             #${PANEL_ID} .ns-privacy-body p { margin: 0 0 7px; }
             #${PANEL_ID} .ns-privacy-body strong { color: #d6dbe0; }
 
-            #${PANEL_ID}[data-theme="almanac"] {
-                --ns-panel-bg: #071321;
-                --ns-body-bg: #081a2d;
-                --ns-header-top: #0c3150;
-                --ns-header-bottom: #071827;
-                --ns-status-bg: #07121f;
-                --ns-composer-bg: #07111c;
-                --ns-input-bg: #091827;
-                --ns-border: #0a6ea3;
-                --ns-text: #d9f4ff;
-                --ns-message-text: #e6f7ff;
-                --ns-muted: #7fa7b8;
-                --ns-online: #22c9ff;
-                --ns-name: #11c6ff;
-                --ns-faction: #6d9fb2;
-                --ns-time: #6c8794;
-                --ns-accent: #067fb8;
-                --ns-scroll-track: #06111c;
-                --ns-scroll-thumb: #00aee8;
-                --ns-scroll-thumb-hover: #31d4ff;
+            #${PANEL_ID}[data-theme="naughty-souls"] {
+                --ns-panel-bg: #0d0712;
+                --ns-body-bg: #110819;
+                --ns-header-top: #381147;
+                --ns-header-bottom: #120719;
+                --ns-status-bg: #160a20;
+                --ns-composer-bg: #110716;
+                --ns-input-bg: #21102c;
+                --ns-border: #a547d1;
+                --ns-text: #f7ecff;
+                --ns-message-text: #fff3ff;
+                --ns-muted: #c2a4d0;
+                --ns-online: #ff8fe5;
+                --ns-name: #efb3ff;
+                --ns-faction: #d0a3ef;
+                --ns-time: #bea4ce;
+                --ns-accent: #8a2fb2;
+                --ns-scroll-track: #100617;
+                --ns-scroll-thumb: #a83ecb;
+                --ns-scroll-thumb-hover: #e879f7;
             }
 
-            #${PANEL_ID}[data-theme="flux"] {
-                --ns-panel-bg: #100818;
-                --ns-body-bg: #12091d;
-                --ns-header-top: #29103d;
-                --ns-header-bottom: #13091f;
-                --ns-status-bg: #110719;
-                --ns-composer-bg: #0e0715;
-                --ns-input-bg: #170b22;
-                --ns-border: #6f2296;
-                --ns-text: #f1e5ff;
-                --ns-message-text: #f5efff;
-                --ns-muted: #aa8cb7;
-                --ns-online: #28e4f1;
-                --ns-name: #30e2ef;
-                --ns-faction: #c24ae6;
-                --ns-time: #8d7b98;
-                --ns-accent: #70269c;
-                --ns-scroll-track: #0b0610;
-                --ns-scroll-thumb: #9e2ccc;
-                --ns-scroll-thumb-hover: #d53eff;
-            }
+
 
             #${PANEL_ID} .ns-settings {
                 position: absolute;
@@ -1457,7 +1443,7 @@
     }
 
     function applyTheme(theme, persist = true) {
-        const nextTheme = THEMES.has(theme) ? theme : 'default';
+        const nextTheme = normalizeTheme(theme);
         state.theme = nextTheme;
 
         if (ui.panel) {
@@ -1471,7 +1457,7 @@
             ui.themeSelect.value = nextTheme;
         }
 
-        if (persist) GM_setValue(THEME_KEY, nextTheme);
+        if (persist || theme !== nextTheme) GM_setValue(THEME_KEY, nextTheme);
     }
 
     function saveUiState(partial = {}) {
@@ -2951,8 +2937,7 @@
 
         for (const [value, label] of [
             ['default', 'Default'],
-            ['almanac', 'Almanac'],
-            ['flux', 'NS']
+            ['naughty-souls', 'Naughty Souls']
         ]) {
             const option = document.createElement('option');
             option.value = value;
