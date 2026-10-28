@@ -3,7 +3,7 @@
 // @namespace    almanac.shared.chat
 // @updateURL   https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
 // @downloadURL https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
-// @version      0.1.71
+// @version      0.1.72
 // @description  Secure shared chat for approved Torn factions using CSP-safe HTTP polling; does not scrape Torn pages.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -143,6 +143,7 @@
         token: GM_getValue(TOKEN_KEY, ''),
         refreshToken: GM_getValue(REFRESH_TOKEN_KEY, ''),
         refreshInFlight: null,
+        sessionGeneration: 0,
         roomId: null,
         roomName: 'Flux Family',
         keyVersion: null,
@@ -166,6 +167,8 @@
         staffRoles: {},
         moderationMembers: [],
         moderationAudit: [],
+        roomAccessUsers: [],
+        accessActionInFlight: false,
         deletedMessageIds: new Set(),
         pollTimer: null,
         pollInFlight: false,
@@ -2358,6 +2361,10 @@
         return ['owner', 'admin', 'moderator'].includes(String(role || '').toLowerCase());
     }
 
+    function canManageRoomAccess() {
+        return ['owner', 'admin'].includes(currentRole());
+    }
+
     function targetRole(userId) {
         if (Number(userId) === Number(state.me?.id)) return currentRole();
         return String(state.staffRoles[String(userId)] || 'member').toLowerCase();
@@ -2379,6 +2386,11 @@
         const visible = isStaffRole();
         ui.manageButton.classList.toggle('ac-show', visible);
         if (!visible) ui.manage?.classList.remove('ac-show');
+        if (ui.accessSection) ui.accessSection.hidden = !canManageRoomAccess();
+        if (!canManageRoomAccess()) {
+            state.roomAccessUsers = [];
+            if (ui.accessUsers) ui.accessUsers.textContent = '';
+        }
     }
 
     function setManageStatus(text = '', isError = false) {
@@ -2395,6 +2407,8 @@
             banned: 'banned',
             unbanned: 'unbanned',
             message_deleted: 'deleted a message from',
+            access_approved: 'approved room access for',
+            access_revoked: 'revoked room access for',
         };
         return names[String(action || '')] || String(action || '').replace(/_/g, ' ');
     }
@@ -2452,6 +2466,86 @@
         } catch (err) {
             setManageStatus(err.message || 'Moderation action failed', true);
             return false;
+        }
+    }
+
+    function renderRoomAccessUsers() {
+        if (!ui.accessSection || !ui.accessUsers) return;
+        ui.accessSection.hidden = !canManageRoomAccess();
+        ui.accessUsers.textContent = '';
+        if (!canManageRoomAccess()) return;
+        ui.accessApprove.disabled = state.accessActionInFlight;
+        ui.accessInput.disabled = state.accessActionInFlight;
+
+        if (!state.roomAccessUsers.length) {
+            ui.accessUsers.appendChild(el('div', 'ac-audit-entry', 'No manually approved users.'));
+            return;
+        }
+        for (const user of state.roomAccessUsers) {
+            const userId = Number(user.user_id);
+            if (!Number.isSafeInteger(userId) || userId <= 0) continue;
+            const row = el('div', 'ac-manage-member');
+            const top = el('div', 'ac-manage-member-top');
+            const name = String(user.username || `User ${userId}`);
+            top.appendChild(el('div', 'ac-manage-member-name', `${name} [${userId}]`));
+            const faction = String(user.faction_name || '').trim() ||
+                (Number(user.faction_id) > 0 ? `Faction ${user.faction_id}` : 'Identity verified on login');
+            const sub = el('div', 'ac-manage-member-sub', faction);
+            const actions = el('div', 'ac-manage-actions');
+            const revoke = el('button', 'ac-danger', 'Revoke');
+            revoke.type = 'button';
+            revoke.disabled = state.accessActionInFlight;
+            revoke.addEventListener('click', () => {
+                if (!canManageRoomAccess()) return;
+                if (!window.confirm(`Revoke manual room access for ${name} [${userId}]? Allowed faction membership still grants access.`)) return;
+                changeRoomAccess('revoke', userId);
+            });
+            actions.appendChild(revoke);
+            row.append(top, sub, actions);
+            ui.accessUsers.appendChild(row);
+        }
+    }
+
+    async function loadRoomAccessUsers() {
+        if (!canManageRoomAccess()) {
+            state.roomAccessUsers = [];
+            renderRoomAccessUsers();
+            return;
+        }
+        const data = await api('/api/moderation/access');
+        if (data.role && state.me) state.me.role = String(data.role).toLowerCase();
+        state.roomAccessUsers = canManageRoomAccess() && Array.isArray(data.users) ? data.users : [];
+        renderRoomAccessUsers();
+        refreshManageVisibility();
+    }
+
+    async function changeRoomAccess(action, userId) {
+        if (!canManageRoomAccess() || state.accessActionInFlight) return false;
+        if (!['approve', 'revoke'].includes(action) || !Number.isSafeInteger(userId) || userId <= 0) {
+            setManageStatus('Enter a valid Torn user ID.', true);
+            return false;
+        }
+        state.accessActionInFlight = true;
+        renderRoomAccessUsers();
+        setManageStatus('Saving room access...');
+        try {
+            await api(`/api/moderation/access/${action}`, {
+                method: 'POST',
+                body: JSON.stringify({ user_id: userId }),
+            });
+            if (action === 'approve' && ui.accessInput) ui.accessInput.value = '';
+            const refreshed = await loadModerationManage(false);
+            await loadModerationAudit();
+            const message = `Room access ${action === 'approve' ? 'approved' : 'revoked'} for Torn ID ${userId}.`;
+            setManageStatus(refreshed === false ? `${message} Refresh the panel to reload the list.` : message, refreshed === false);
+            schedulePoll(0);
+            return true;
+        } catch (err) {
+            setManageStatus(err.message || 'Could not update room access', true);
+            return false;
+        } finally {
+            state.accessActionInFlight = false;
+            renderRoomAccessUsers();
         }
     }
 
@@ -2588,9 +2682,12 @@
             if (ui.manageRole) ui.manageRole.textContent = currentRole();
             renderModerationMembers();
             setManageStatus(`${state.moderationMembers.length} members`);
+            await loadRoomAccessUsers();
             if (loadAudit) await loadModerationAudit();
+            return true;
         } catch (err) {
             setManageStatus(err.message || 'Could not load moderation data', true);
+            return false;
         }
     }
 
@@ -2958,11 +3055,27 @@
 
         const manageStatus = el('div', 'ac-manage-status');
         const manageScroll = el('div', 'ac-manage-scroll');
+        const accessSection = el('section', 'ac-access-section');
+        accessSection.hidden = true;
+        const accessTitle = el('div', 'ac-manage-section-title', 'Approved Users');
+        const accessForm = el('form', 'ac-manage-controls');
+        const accessInput = document.createElement('input');
+        accessInput.className = 'ac-manage-search';
+        accessInput.type = 'text';
+        accessInput.inputMode = 'numeric';
+        accessInput.autocomplete = 'off';
+        accessInput.placeholder = 'Torn ID';
+        accessInput.setAttribute('aria-label', 'Torn user ID to approve');
+        const accessApprove = el('button', 'ac-manage-refresh', 'Approve');
+        accessApprove.type = 'submit';
+        accessForm.append(accessInput, accessApprove);
+        const accessUsers = el('div', 'ac-access-users');
+        accessSection.append(accessTitle, accessForm, accessUsers);
         const membersTitle = el('div', 'ac-manage-section-title', 'Members');
         const manageMembers = el('div', 'ac-manage-members');
         const auditTitle = el('div', 'ac-manage-section-title', 'Audit log');
         const auditList = el('div', 'ac-audit-list');
-        manageScroll.append(membersTitle, manageMembers, auditTitle, auditList);
+        manageScroll.append(accessSection, membersTitle, manageMembers, auditTitle, auditList);
         manage.append(manageHead, manageControls, manageStatus, manageScroll);
 
         const login = el('div', 'ac-login');
@@ -3044,7 +3157,7 @@
         // pair it with an unrelated text/search field from Torn or another userscript.
         panel.append(header, status, body, newMessages, composer, mentionMenu, emojiPicker, settings, manage);
         document.body.appendChild(panel);
-        ui = { panel, header, title, online, manageButton, settingsButton, mobileSizeButton, min, close, status, body, newMessages, composer, replyCompose, replyComposeTarget, replyCancel, textarea, mentionMenu, emojiButton, emojiPicker, send, login, input, loginButton, loginError, settings, themeSelect, imagePreviewSelect, signOutButton, manage, manageRole, manageRefresh, manageClose, manageSearch, manageStatus, manageMembers, auditList };
+        ui = { panel, header, title, online, manageButton, settingsButton, mobileSizeButton, min, close, status, body, newMessages, composer, replyCompose, replyComposeTarget, replyCancel, textarea, mentionMenu, emojiButton, emojiPicker, send, login, input, loginButton, loginError, settings, themeSelect, imagePreviewSelect, signOutButton, manage, manageRole, manageRefresh, manageClose, manageSearch, manageStatus, manageMembers, auditList, accessSection, accessInput, accessApprove, accessUsers };
         refreshManageVisibility();
 
         applyTheme(state.theme, false);
@@ -3111,6 +3224,17 @@
         });
 
         manageSearch.addEventListener('input', renderModerationMembers);
+
+        accessForm.addEventListener('submit', (event) => {
+            event.preventDefault();
+            if (!canManageRoomAccess()) return;
+            const value = accessInput.value.trim();
+            if (!/^[1-9]\d*$/.test(value)) {
+                setManageStatus('Enter a valid Torn user ID.', true);
+                return;
+            }
+            changeRoomAccess('approve', Number(value));
+        });
 
         settingsButton.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -3676,6 +3800,7 @@
     }
 
     async function apiRaw(path, options = {}) {
+        const requestGeneration = state.sessionGeneration;
         const headers = {
             'Content-Type': 'application/json',
             ...(options.headers || {})
@@ -3695,6 +3820,10 @@
                 timeout: Number(options.timeout || REQUEST_TIMEOUT_MS),
 
                 onload: (response) => {
+                    if (!options.skipAuth && requestGeneration !== state.sessionGeneration) {
+                        reject(sessionEndedError());
+                        return;
+                    }
                     let data = {};
                     try {
                         data = response.responseText ? JSON.parse(response.responseText) : {};
@@ -3718,11 +3847,27 @@
         });
     }
 
+    function sessionEndedError() {
+        const err = new Error('Chat session ended');
+        err.cancelled = true;
+        return err;
+    }
+
+    function requireCurrentSession(generation, requireSharedRefresh = false) {
+        if (
+            generation !== state.sessionGeneration ||
+            (requireSharedRefresh && !String(GM_getValue(REFRESH_TOKEN_KEY, '') || ''))
+        ) {
+            throw sessionEndedError();
+        }
+    }
+
     async function refreshAccessToken() {
         if (state.refreshInFlight) {
             return state.refreshInFlight;
         }
 
+        const generation = state.sessionGeneration;
         state.refreshInFlight = (async () => {
             // Always prefer the latest shared session values. Another Torn tab may
             // already have rotated the refresh token.
@@ -3736,6 +3881,7 @@
             const acquired = await acquireRefreshLock(startingRefreshToken);
 
             if (!acquired) {
+                requireCurrentSession(generation, true);
                 const shared = adoptSharedSession();
 
                 if (
@@ -3754,6 +3900,7 @@
             }
 
             try {
+                requireCurrentSession(generation, true);
                 // The lock may have been obtained just after another tab completed
                 // a refresh. Re-check storage before using the old token.
                 const currentSharedRefresh = String(
@@ -3783,6 +3930,7 @@
                         })
                     });
                 } catch (err) {
+                    requireCurrentSession(generation, true);
                     // If another tab won a very tight race and already rotated the
                     // token, use its newly-published session instead of logging out.
                     const newerRefresh = String(
@@ -3810,6 +3958,7 @@
                     throw err;
                 }
 
+                requireCurrentSession(generation, true);
                 if (!result.token || !result.refresh_token) {
                     throw new Error('Invalid refresh response');
                 }
@@ -3838,7 +3987,7 @@
         try {
             return await state.refreshInFlight;
         } finally {
-            state.refreshInFlight = null;
+            if (generation === state.sessionGeneration) state.refreshInFlight = null;
         }
     }
 
@@ -3861,6 +4010,7 @@
             try {
                 await refreshAccessToken();
             } catch (refreshErr) {
+                if (refreshErr.cancelled) throw refreshErr;
                 const sharedToken = String(GM_getValue(TOKEN_KEY, '') || '');
                 const sharedRefresh = String(GM_getValue(REFRESH_TOKEN_KEY, '') || '');
 
@@ -3896,6 +4046,7 @@
 
         const key = ui.input.value.trim();
         if (!key) return;
+        const generation = state.sessionGeneration;
         ui.loginError.textContent = '';
         ui.loginButton.disabled = true;
         ui.loginButton.textContent = 'Verifying...';
@@ -3905,6 +4056,7 @@
                 method: 'POST',
                 body: JSON.stringify({ api_key: key }),
             });
+            requireCurrentSession(generation);
             ui.input.value = '';
             state.token = result.token;
             state.refreshToken = result.refresh_token || '';
@@ -3914,11 +4066,12 @@
             unmountLoginPanel();
             state.initialized = false;
             await loadBootstrap(true);
+            requireCurrentSession(generation);
             state.initialized = true;
             startPolling();
         } catch (err) {
             ui.input.value = '';
-            ui.loginError.textContent = err.message || 'Authentication failed';
+            if (!err.cancelled) ui.loginError.textContent = err.message || 'Authentication failed';
         } finally {
             ui.loginButton.disabled = false;
             ui.loginButton.textContent = 'Verify and connect';
@@ -3930,25 +4083,19 @@
             return state.bootstrapInFlight;
         }
 
+        const generation = state.sessionGeneration;
         state.bootstrapInFlight = (async () => {
-            if (!state.token && state.refreshToken) {
-                try {
-                    await refreshAccessToken();
-                } catch (err) {
-                    if (err.status === 401 || err.status === 403) {
-                        logoutLocal();
-                    } else {
-                        throw err;
-                    }
-                }
-            }
-
-            if (!state.token) {
-                if (interactive) showLogin();
-                return;
-            }
-
             try {
+                if (!state.token && state.refreshToken) {
+                    await refreshAccessToken();
+                }
+
+                requireCurrentSession(generation);
+                if (!state.token) {
+                    if (interactive) showLogin();
+                    return;
+                }
+
                 // Do not allow polling to use cursor=0 while bootstrap is still loading.
                 state.initialized = false;
 
@@ -3958,11 +4105,14 @@
                 }
 
                 await ensureCustomEmojiReady();
+                requireCurrentSession(generation);
                 await loadBootstrap(renderHistory);
+                requireCurrentSession(generation);
                 state.initialized = true;
                 refreshNotifyLeadership();
                 startPolling();
             } catch (err) {
+                if (err.cancelled) return;
                 state.initialized = false;
 
                 if (err.status === 401 || err.status === 403) {
@@ -3978,7 +4128,11 @@
                 } else {
                     setStatus(`Connection error: ${err.message}`, true);
                     setTimeout(
-                        () => startIfNeeded(renderHistory, interactive),
+                        () => {
+                            if (generation === state.sessionGeneration && (state.token || state.refreshToken)) {
+                                startIfNeeded(renderHistory, interactive);
+                            }
+                        },
                         5000
                     );
                 }
@@ -3988,7 +4142,7 @@
         try {
             return await state.bootstrapInFlight;
         } finally {
-            state.bootstrapInFlight = null;
+            if (generation === state.sessionGeneration) state.bootstrapInFlight = null;
         }
     }
 
@@ -4054,6 +4208,7 @@
     function logoutLocal() {
         const oldToken = state.token;
         const oldRefresh = state.refreshToken;
+        state.sessionGeneration++;
 
         state.token = '';
         state.refreshToken = '';
@@ -4074,6 +4229,8 @@
         state.staffRoles = {};
         state.moderationMembers = [];
         state.moderationAudit = [];
+        state.roomAccessUsers = [];
+        state.accessActionInFlight = false;
         state.deletedMessageIds.clear();
         refreshManageVisibility();
         state.mentionSuggestions = [];
@@ -4108,7 +4265,9 @@
 
 
     async function loadBootstrap(renderHistory) {
+        const generation = state.sessionGeneration;
         const data = await api('/api/bootstrap');
+        requireCurrentSession(generation);
 
         state.roomId = data.room.id;
         state.roomName = data.room.name;
@@ -4172,7 +4331,9 @@
 
         ui.title.textContent = state.roomName;
         ui.textarea.maxLength = state.maxMessageChars;
-        state.cryptoKey = await importRoomKey(data.room_key);
+        const cryptoKey = await importRoomKey(data.room_key);
+        requireCurrentSession(generation);
+        state.cryptoKey = cryptoKey;
 
         if (renderHistory) {
             ui.body.textContent = '';
@@ -4574,6 +4735,7 @@
     }
 
     async function renderEncryptedMessage(msg, prepend = false) {
+        const generation = state.sessionGeneration;
         const wasNearBottom = prepend ? false : isNearBottom();
 
         if (msg?.type === 'message_deleted') {
@@ -4598,6 +4760,7 @@
                 text = '[Unable to decrypt this message]';
             }
         }
+        requireCurrentSession(generation);
 
         const wrap = el('div', `ac-msg${deleted ? ' ac-deleted' : ''}`);
         wrap.dataset.messageId = String(msg.message_id || '');
@@ -4892,17 +5055,14 @@
 
         GM_addValueChangeListener(TOKEN_KEY, (_name, _oldValue, newValue, remote) => {
             if (!remote) return;
-            state.token = String(newValue || '');
-
-            if (!state.token) {
-                state.initialized = false;
-                releaseNotifyLeadership();
-            }
+            if (!newValue) logoutLocal();
+            else state.token = String(newValue);
         });
 
         GM_addValueChangeListener(REFRESH_TOKEN_KEY, (_name, _oldValue, newValue, remote) => {
             if (!remote) return;
-            state.refreshToken = String(newValue || '');
+            if (!newValue) logoutLocal();
+            else state.refreshToken = String(newValue);
         });
 
         GM_addValueChangeListener(UNREAD_STATE_KEY, (_name, _oldValue, newValue, remote) => {

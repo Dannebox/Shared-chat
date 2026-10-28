@@ -1,0 +1,5236 @@
+// ==UserScript==
+// @name         Naughty Souls Shared Chat
+// @namespace    naughty.souls.shared.chat
+// @updateURL   https://raw.githubusercontent.com/Dannebox/Shared-chat/main/naughty_souls/Chat.user.js
+// @downloadURL https://raw.githubusercontent.com/Dannebox/Shared-chat/main/naughty_souls/Chat.user.js
+// @version      0.1.0
+// @description  Secure shared chat for approved Torn factions using CSP-safe HTTP polling; does not scrape Torn pages.
+// @match        https://www.torn.com/*
+// @match        https://torn.com/*
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
+// @grant        GM_addValueChangeListener
+// @grant        GM.xmlHttpRequest
+// @connect      127.0.0.1
+// @connect      naughtysouls-chat.shiroshura.com
+// @connect      raw.githubusercontent.com
+// @run-at       document-idle
+// ==/UserScript==
+
+(() => {
+    'use strict';
+
+    // CHANGE THIS to your HTTPS hostname. Do not put any secrets in this file.
+    const API_BASE = 'https://naughtysouls-chat.shiroshura.com';
+    const TOKEN_KEY = 'naughty_souls_chat_session_v1';
+    const REFRESH_TOKEN_KEY = 'naughty_souls_chat_refresh_v1';
+    const UI_STATE_KEY = 'naughty_souls_chat_ui_state_v1';
+    const DESKTOP_GEOMETRY_KEY = 'naughty_souls_chat_desktop_geometry_v1';
+    const THEME_KEY = 'naughty_souls_chat_theme_v1';
+    const IMAGE_PREVIEW_KEY = 'naughty_souls_chat_external_image_previews_v1';
+    const PANEL_ID = 'naughty-souls-chat';
+    const LAUNCHER_ID = 'naughty-souls-chat-launcher';
+    const POLL_OPEN_MS = 3000;
+    const POLL_CLOSED_MS = 10000;
+    const MOBILE_MEDIA = '(max-width: 700px)';
+    const UPDATE_URL = 'https://raw.githubusercontent.com/Dannebox/Shared-chat/main/naughty_souls/Chat.user.js';
+    const UPDATE_CHECK_KEY = 'naughty_souls_chat_update_check_v2';
+    const UPDATE_AVAILABLE_KEY = 'naughty_souls_chat_update_available_v1';
+    const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+    const HISTORY_PAGE_SIZE = 20;
+    const HISTORY_MAX_LOADED = 100;
+
+    // Notification reliability:
+    // - active/open: fast polling
+    // - active/closed: normal polling
+    // - background: exactly one elected Torn tab polls
+    const POLL_BACKGROUND_MS = 25000;
+    const UNREAD_STATE_KEY = 'naughty_souls_chat_unread_state_v1';
+    const NOTIFY_LEADER_KEY = 'naughty_souls_chat_notify_leader_v1';
+    const REFRESH_LOCK_KEY = 'naughty_souls_chat_refresh_lock_v1';
+    const NOTIFY_LEASE_MS = 20000;
+    const NOTIFY_HEARTBEAT_MS = 8000;
+    const REFRESH_LOCK_MS = 20000;
+    const REFRESH_WAIT_MS = 22000;
+    const REQUEST_TIMEOUT_MS = 15000;
+    const MAX_RENDERED_MESSAGES = 500;
+    const CUSTOM_EMOJI_MANIFEST_PATH = '/assets/emojis/manifest.json';
+    const CUSTOM_EMOJI_MANIFEST_TIMEOUT_MS = 5000;
+    const CUSTOM_EMOJI_MAX = 100;
+    const CUSTOM_EMOJI_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/i;
+    const DIRECT_IMAGE_EXTENSIONS = /\.(?:png|jpe?g|webp|gif|avif)$/i;
+    const MESSAGE_ENVELOPE_PREFIX = 'FLUXMSG1:';
+    const REPLY_JUMP_MAX_PAGES = 25;
+    const TAB_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+
+    const THEME_ASSETS = {
+        almanac: {
+            header: 'https://naughtysouls-chat.shiroshura.com/assets/almanac/header.webp',
+            background: 'https://naughtysouls-chat.shiroshura.com/assets/almanac/background.webp'
+        },
+
+        flux: {
+            header: 'https://naughtysouls-chat.shiroshura.com/assets/flux/header.webp',
+            background: 'https://naughtysouls-chat.shiroshura.com/assets/flux/background.webp'
+        }
+    };
+
+    const THEMES = new Set(['default', 'almanac', 'flux']);
+
+    const EMOJI_SHORTCODES = {
+        smile: '😄',
+        grin: '😁',
+        joy: '😂',
+        laugh: '🤣',
+        wink: '😉',
+        blush: '😊',
+        heart_eyes: '😍',
+        thinking: '🤔',
+        neutral: '😐',
+        sad: '😢',
+        cry: '😭',
+        angry: '😠',
+        rage: '😡',
+        skull: '💀',
+        clown: '🤡',
+        sunglasses: '😎',
+        party: '🥳',
+        fire: '🔥',
+        heart: '❤️',
+        blue_heart: '💙',
+        purple_heart: '💜',
+        green_heart: '💚',
+        broken_heart: '💔',
+        thumbsup: '👍',
+        thumbsdown: '👎',
+        clap: '👏',
+        pray: '🙏',
+        muscle: '💪',
+        ok_hand: '👌',
+        eyes: '👀',
+        wave: '👋',
+        point_up: '☝️',
+        check: '✅',
+        cross: '❌',
+        warning: '⚠️',
+        star: '⭐',
+        sparkles: '✨',
+        rocket: '🚀',
+        boom: '💥',
+        hundred: '💯'
+    };
+
+    const EMOJI_PICKER_ITEMS = [
+        '😄','😁','😂','🤣','😉','😊','😍','🤔','😐','😢',
+        '😭','😠','😡','💀','🤡','😎','🥳','🔥','❤️','💙',
+        '💜','💚','💔','👍','👎','👏','🙏','💪','👌','👀',
+        '👋','☝️','✅','❌','⚠️','⭐','✨','🚀','💥','💯'
+    ];
+
+    function preloadThemeAssets() {
+        for (const theme of Object.values(THEME_ASSETS)) {
+            for (const url of [theme.header, theme.background]) {
+                if (!url) continue;
+                const img = new Image();
+                img.decoding = 'async';
+                img.src = url;
+            }
+        }
+    }
+
+    const state = {
+        token: GM_getValue(TOKEN_KEY, ''),
+        refreshToken: GM_getValue(REFRESH_TOKEN_KEY, ''),
+        refreshInFlight: null,
+        sessionGeneration: 0,
+        roomId: null,
+        roomName: 'Naughty Souls',
+        keyVersion: null,
+        cryptoKey: null,
+        me: null,
+        maxMessageChars: 1000,
+        unread: 0,
+        mentionUnread: 0,
+        unreadMessageIds: new Set(),
+        mentionUnreadMessageIds: new Set(),
+        lastReadSeq: 0,
+        unreadStateHasReadSeq: false,
+        unreadStateUserId: 0,
+        notifyLeader: false,
+        notifyHeartbeatTimer: null,
+        mentionDirectory: { users: [], factions: [] },
+        mentionSuggestions: [],
+        mentionSelection: 0,
+        customEmojis: new Map(),
+        customEmojiReadyPromise: null,
+        staffRoles: {},
+        moderationMembers: [],
+        moderationAudit: [],
+        roomAccessUsers: [],
+        accessActionInFlight: false,
+        deletedMessageIds: new Set(),
+        pollTimer: null,
+        pollInFlight: false,
+        pollFailures: 0,
+        bootstrapInFlight: null,
+        initialized: false,
+        lastCursor: 0,
+        seenMessageIds: new Set(),
+        factionNames: {},
+        theme: THEMES.has(GM_getValue(THEME_KEY, 'default')) ? GM_getValue(THEME_KEY, 'default') : 'default',
+        externalImagePreviews: GM_getValue(IMAGE_PREVIEW_KEY, true) !== false,
+        updateAvailable: GM_getValue(UPDATE_AVAILABLE_KEY, ''),
+        historyLoaded: 0,
+        oldestHistorySeq: 0,
+        historyLoading: false,
+        historyExhausted: false,
+        historyServerExhausted: false,
+        replyingTo: null,
+    };
+
+    let ui = {};
+
+    // Transient mobile-only viewport state. This is intentionally not persisted:
+    // it only prevents keyboard open/close from slightly changing the compact size.
+    let mobileCompactHeight = null;
+    let mobileKeyboardWasOpen = false;
+
+    function applySharedUnreadValue(saved) {
+        const savedUserId = Number(saved?.userId || 0);
+        const currentUserId = Number(state.me?.id || 0);
+
+        // Tampermonkey storage is shared by Torn tabs. Do not let another logged-in
+        // Torn account overwrite this account's unread state.
+        if (currentUserId && savedUserId && currentUserId !== savedUserId) return;
+
+        const ids = Array.isArray(saved?.ids)
+            ? saved.ids.map(String).filter(Boolean).slice(-100)
+            : [];
+
+        const idSet = new Set(ids);
+
+        const mentionIds = Array.isArray(saved?.mentionIds)
+            ? saved.mentionIds
+                .map(String)
+                .filter(id => id && idSet.has(id))
+                .slice(-100)
+            : [];
+
+        const readSeq = Number(saved?.lastReadSeq);
+
+        state.unreadMessageIds = idSet;
+        state.mentionUnreadMessageIds = new Set(mentionIds);
+        state.unread = state.unreadMessageIds.size;
+        state.mentionUnread = state.mentionUnreadMessageIds.size;
+        state.unreadStateUserId = savedUserId;
+        state.unreadStateHasReadSeq = Number.isFinite(readSeq) && readSeq >= 0;
+
+        if (state.unreadStateHasReadSeq) {
+            state.lastReadSeq = Math.max(0, Math.floor(readSeq));
+        }
+
+        updateBadge();
+    }
+
+    function loadSharedUnread() {
+        applySharedUnreadValue(GM_getValue(UNREAD_STATE_KEY, null));
+    }
+
+    function saveSharedUnread() {
+        const ids = [...state.unreadMessageIds].slice(-100);
+        const idSet = new Set(ids);
+        const mentionIds = [...state.mentionUnreadMessageIds]
+            .filter(id => idSet.has(id))
+            .slice(-100);
+
+        state.unreadMessageIds = new Set(ids);
+        state.mentionUnreadMessageIds = new Set(mentionIds);
+        state.unread = ids.length;
+        state.mentionUnread = mentionIds.length;
+        state.unreadStateHasReadSeq = true;
+        state.unreadStateUserId = Number(
+            state.me?.id ||
+            state.unreadStateUserId ||
+            0
+        );
+
+        GM_setValue(UNREAD_STATE_KEY, {
+            userId: state.unreadStateUserId || null,
+            lastReadSeq: Math.max(0, Number(state.lastReadSeq || 0)),
+            ids,
+            mentionIds,
+            updatedAt: Date.now(),
+            updatedBy: TAB_ID,
+        });
+
+        updateBadge();
+    }
+
+    function getSharedLastReadSeq() {
+        const saved = GM_getValue(UNREAD_STATE_KEY, null);
+        const savedUserId = Number(saved?.userId || 0);
+        const currentUserId = Number(state.me?.id || 0);
+
+        if (currentUserId && savedUserId && currentUserId !== savedUserId) {
+            return 0;
+        }
+
+        const seq = Number(saved?.lastReadSeq);
+        return Number.isFinite(seq) && seq >= 0 ? Math.floor(seq) : 0;
+    }
+
+    function addSharedUnread(messageId, mentionsMe = false, seq = 0) {
+        const id = String(messageId || '');
+        const numericSeq = Math.max(0, Number(seq || 0));
+        if (!id) return;
+
+        const saved = GM_getValue(UNREAD_STATE_KEY, null);
+        const savedUserId = Number(saved?.userId || 0);
+        const currentUserId = Number(state.me?.id || 0);
+
+        // If storage belongs to another Torn account, start a clean state for
+        // the currently authenticated account.
+        const sameUser =
+            !savedUserId ||
+            !currentUserId ||
+            savedUserId === currentUserId;
+
+        const sharedReadSeq = sameUser
+            ? Math.max(0, Number(saved?.lastReadSeq || 0))
+            : 0;
+
+        // Another active tab may already have displayed/read this message.
+        if (numericSeq && numericSeq <= sharedReadSeq) {
+            state.lastReadSeq = Math.max(state.lastReadSeq, sharedReadSeq);
+            return;
+        }
+
+        const ids = new Set(
+            sameUser && Array.isArray(saved?.ids)
+                ? saved.ids.map(String).filter(Boolean)
+                : []
+        );
+
+        const mentionIds = new Set(
+            sameUser && Array.isArray(saved?.mentionIds)
+                ? saved.mentionIds.map(String).filter(Boolean)
+                : []
+        );
+
+        ids.add(id);
+        if (mentionsMe) mentionIds.add(id);
+
+        const trimmedIds = [...ids].slice(-100);
+        const trimmedSet = new Set(trimmedIds);
+
+        state.lastReadSeq = Math.max(state.lastReadSeq, sharedReadSeq);
+        state.unreadMessageIds = trimmedSet;
+        state.mentionUnreadMessageIds = new Set(
+            [...mentionIds].filter(value => trimmedSet.has(value)).slice(-100)
+        );
+
+        saveSharedUnread();
+    }
+
+    function clearSharedUnread(readThroughSeq = state.lastCursor) {
+        const sharedReadSeq = getSharedLastReadSeq();
+        const targetSeq = Math.max(
+            sharedReadSeq,
+            Number(state.lastReadSeq || 0),
+            Number(readThroughSeq || 0)
+        );
+
+        state.lastReadSeq = targetSeq;
+        state.unreadMessageIds.clear();
+        state.mentionUnreadMessageIds.clear();
+        state.unread = 0;
+        state.mentionUnread = 0;
+
+        saveSharedUnread();
+    }
+
+    function releaseNotifyLeadership() {
+        const lease = GM_getValue(NOTIFY_LEADER_KEY, null);
+
+        if (lease?.tabId === TAB_ID) {
+            GM_setValue(NOTIFY_LEADER_KEY, {
+                tabId: '',
+                expiresAt: 0,
+            });
+        }
+
+        state.notifyLeader = false;
+    }
+
+    function refreshNotifyLeadership() {
+        // Only a fully authenticated/bootstrapped tab may own the background
+        // polling lease. A logged-out/stale tab must never block notifications.
+        if (!state.token || !state.initialized) {
+            releaseNotifyLeadership();
+            return false;
+        }
+
+        const now = Date.now();
+        const lease = GM_getValue(NOTIFY_LEADER_KEY, null);
+
+        const expired =
+            !lease ||
+            typeof lease !== 'object' ||
+            !Number.isFinite(Number(lease.expiresAt)) ||
+            Number(lease.expiresAt) <= now;
+
+        const mine = lease?.tabId === TAB_ID;
+
+        if (expired || mine) {
+            GM_setValue(NOTIFY_LEADER_KEY, {
+                tabId: TAB_ID,
+                expiresAt: now + NOTIFY_LEASE_MS,
+            });
+            state.notifyLeader = true;
+        } else {
+            state.notifyLeader = false;
+        }
+
+        return state.notifyLeader;
+    }
+
+    function startNotifyLeadership() {
+        if (state.notifyHeartbeatTimer) {
+            clearInterval(state.notifyHeartbeatTimer);
+        }
+
+        state.notifyHeartbeatTimer = setInterval(() => {
+            const wasLeader = state.notifyLeader;
+            refreshNotifyLeadership();
+
+            // If this background tab just acquired the lease, wake it immediately
+            // instead of waiting for the next 25-second background timer.
+            if (
+                !isPageActive() &&
+                state.notifyLeader &&
+                state.initialized &&
+                !wasLeader
+            ) {
+                schedulePoll(0);
+            }
+        }, NOTIFY_HEARTBEAT_MS);
+    }
+
+    function sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function adoptSharedSession() {
+        const sharedToken = String(GM_getValue(TOKEN_KEY, '') || '');
+        const sharedRefresh = String(GM_getValue(REFRESH_TOKEN_KEY, '') || '');
+
+        if (sharedToken) state.token = sharedToken;
+        if (sharedRefresh) state.refreshToken = sharedRefresh;
+
+        return {
+            token: sharedToken,
+            refreshToken: sharedRefresh,
+        };
+    }
+
+    async function acquireRefreshLock(startingRefreshToken) {
+        const deadline = Date.now() + REFRESH_WAIT_MS;
+
+        while (Date.now() < deadline) {
+            const sharedRefresh = String(
+                GM_getValue(REFRESH_TOKEN_KEY, '') || ''
+            );
+
+            // Another tab already rotated the token while we were waiting.
+            if (
+                sharedRefresh &&
+                startingRefreshToken &&
+                sharedRefresh !== startingRefreshToken
+            ) {
+                adoptSharedSession();
+                return false;
+            }
+
+            const now = Date.now();
+            const lease = GM_getValue(REFRESH_LOCK_KEY, null);
+            const expired =
+                !lease ||
+                typeof lease !== 'object' ||
+                Number(lease.expiresAt || 0) <= now;
+
+            if (expired || lease?.tabId === TAB_ID) {
+                GM_setValue(REFRESH_LOCK_KEY, {
+                    tabId: TAB_ID,
+                    expiresAt: now + REFRESH_LOCK_MS,
+                });
+
+                // GM_setValue is not an atomic compare-and-swap. Re-read after a
+                // short yield so simultaneous tabs agree on a single owner.
+                await sleep(60);
+
+                const confirmed = GM_getValue(REFRESH_LOCK_KEY, null);
+                if (
+                    confirmed?.tabId === TAB_ID &&
+                    Number(confirmed?.expiresAt || 0) > Date.now()
+                ) {
+                    return true;
+                }
+            }
+
+            await sleep(150);
+        }
+
+        return false;
+    }
+
+    function releaseRefreshLock() {
+        const lease = GM_getValue(REFRESH_LOCK_KEY, null);
+        if (lease?.tabId === TAB_ID) {
+            GM_setValue(REFRESH_LOCK_KEY, {
+                tabId: '',
+                expiresAt: 0,
+            });
+        }
+    }
+
+
+    function addStyles() {
+        if (document.getElementById('naughty-souls-chat-css')) return;
+        const style = document.createElement('style');
+        style.id = 'naughty-souls-chat-css';
+        style.textContent = `
+            #${PANEL_ID} {
+                --ns-panel-bg: #202225;
+                --ns-body-bg: #26292d;
+                --ns-header-top: #3b4b5f;
+                --ns-header-bottom: #263546;
+                --ns-status-bg: #181a1d;
+                --ns-composer-bg: #1d1f22;
+                --ns-input-bg: #303338;
+                --ns-border: #111;
+                --ns-text: #ddd;
+                --ns-message-text: #e3e3e3;
+                --ns-muted: #9aa0a6;
+                --ns-online: #9ab3cb;
+                --ns-name: #77a7d5;
+                --ns-faction: #8c9298;
+                --ns-time: #777;
+                --ns-accent: #405d79;
+                --ns-scroll-track: #202225;
+                --ns-scroll-thumb: #5d6268;
+                --ns-scroll-thumb-hover: #737980;
+                --ns-theme-header-image: none;
+                --ns-theme-bg-image: none;
+
+                position: fixed;
+                box-sizing: border-box;
+                width: 300px;
+                height: 540px;
+                min-width: 260px;
+                min-height: 220px;
+                max-width: calc(100vw - 16px);
+                max-height: calc(100vh - 16px);
+                resize: both;
+                right: 58px;
+                bottom: 0;
+                z-index: 1000000;
+                display: none;
+                flex-direction: column;
+                overflow: hidden;
+                border: 1px solid rgba(0,0,0,.55);
+                border-radius: 6px 6px 0 0;
+                background: var(--ns-panel-bg);
+                color: var(--ns-text);
+                box-shadow: 0 2px 14px rgba(0,0,0,.55);
+                font-family: Arial, sans-serif;
+                font-size: 12px;
+            }
+            #${PANEL_ID}.ns-visible { display: flex; }
+            #${PANEL_ID}.ns-minimized { height: 38px !important; resize: none; }
+            #${PANEL_ID}.ns-minimized .ns-body,
+            #${PANEL_ID}.ns-minimized .ns-composer,
+            #${PANEL_ID}.ns-minimized .ns-new-messages,
+            #${PANEL_ID}.ns-minimized .ns-status { display: none !important; }
+            #${PANEL_ID} .ns-header {
+                height: 38px;
+                min-height: 38px;
+                display: flex;
+                align-items: center;
+                gap: 7px;
+                padding: 0 8px;
+                background:
+                    linear-gradient(rgba(4, 10, 18, 0.50), rgba(4, 10, 18, 0.50)),
+                    var(--ns-theme-header-image),
+                    linear-gradient(var(--ns-header-top), var(--ns-header-bottom));
+                background-size: cover;
+                background-position: center;
+                border-bottom: 1px solid var(--ns-border);
+                color: #fff;
+                cursor: move;
+                user-select: none;
+                box-sizing: border-box;
+            }
+            #${PANEL_ID} .ns-title { font-weight: 700; flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+            #${PANEL_ID} .ns-online {
+                font-size: 10px;
+                color: var(--ns-online);
+                flex: 0 0 auto;
+                white-space: nowrap;
+            }
+            #${PANEL_ID} .ns-online.ns-update {
+                cursor: pointer;
+                font-weight: 700;
+                text-decoration: underline;
+            }
+            #${PANEL_ID} .ns-online.ns-update:hover {
+                filter: brightness(1.25);
+            }
+            #${PANEL_ID} .ns-header button {
+                border: 0; background: transparent; color: var(--ns-text); cursor: pointer;
+                font-size: 16px; width: 24px; height: 24px; line-height: 20px;
+            }
+            #${PANEL_ID} .ns-header button:hover { color: #fff; }
+            #${PANEL_ID} .ns-status {
+                min-height: 22px; padding: 4px 8px; box-sizing: border-box;
+                background: var(--ns-status-bg); color: var(--ns-muted); border-bottom: 1px solid var(--ns-border);
+                font-size: 10px;
+            }
+            #${PANEL_ID} .ns-body {
+                flex: 1; overflow-y: auto; overflow-x: hidden;
+                padding: 8px; box-sizing: border-box;
+                background:
+                    linear-gradient(rgba(5, 10, 18, 0.73), rgba(5, 10, 18, 0.73)),
+                    var(--ns-theme-bg-image),
+                    var(--ns-body-bg);
+                background-size: cover;
+                background-position: center;
+                scrollbar-width: thin;
+                scrollbar-color: var(--ns-scroll-thumb) var(--ns-scroll-track);
+            }
+
+            #${PANEL_ID} .ns-body::-webkit-scrollbar,
+            #${PANEL_ID} .ns-emoji-picker::-webkit-scrollbar,
+            #${PANEL_ID} .ns-manage-scroll::-webkit-scrollbar {
+                width: 7px;
+            }
+
+            #${PANEL_ID} .ns-body::-webkit-scrollbar-track,
+            #${PANEL_ID} .ns-emoji-picker::-webkit-scrollbar-track,
+            #${PANEL_ID} .ns-manage-scroll::-webkit-scrollbar-track {
+                background: var(--ns-scroll-track);
+            }
+
+            #${PANEL_ID} .ns-body::-webkit-scrollbar-thumb,
+            #${PANEL_ID} .ns-emoji-picker::-webkit-scrollbar-thumb,
+            #${PANEL_ID} .ns-manage-scroll::-webkit-scrollbar-thumb {
+                background: var(--ns-scroll-thumb);
+                border-radius: 6px;
+                border: 1px solid var(--ns-scroll-track);
+            }
+
+            #${PANEL_ID} .ns-body::-webkit-scrollbar-thumb:hover,
+            #${PANEL_ID} .ns-emoji-picker::-webkit-scrollbar-thumb:hover,
+            #${PANEL_ID} .ns-manage-scroll::-webkit-scrollbar-thumb:hover {
+                background: var(--ns-scroll-thumb-hover);
+            }
+            #${PANEL_ID} .ns-msg { margin: 0 0 7px 0; word-break: break-word; line-height: 1.32; border-radius: 4px; }
+            #${PANEL_ID} .ns-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px; margin-bottom: 1px; }
+            #${PANEL_ID} .ns-name { color: var(--ns-name); font-weight: 700; text-decoration: none; cursor: pointer; }
+
+            #${PANEL_ID} .ns-reply-button {
+                width: 18px;
+                height: 18px;
+                padding: 0;
+                border: 0;
+                background: transparent;
+                color: var(--ns-muted);
+                cursor: pointer;
+                font-size: 14px;
+                line-height: 16px;
+                opacity: 0;
+                pointer-events: none;
+                transition: opacity .12s ease;
+            }
+
+            #${PANEL_ID} .ns-msg:hover .ns-reply-button,
+            #${PANEL_ID} .ns-reply-button:focus-visible {
+                opacity: 1;
+                pointer-events: auto;
+            }
+
+            #${PANEL_ID} .ns-reply-button:hover {
+                color: var(--ns-name);
+            }
+
+            #${PANEL_ID} .ns-reply-ref {
+                display: flex;
+                align-items: center;
+                gap: 0;
+                width: fit-content;
+                max-width: 100%;
+                min-width: 145px;
+                margin: 1px 0 4px;
+                padding: 2px 7px 4px;
+                box-sizing: border-box;
+                border: 0;
+                border-left: 2px solid var(--ns-accent);
+                border-bottom: 1px solid rgba(255,255,255,.18);
+                border-radius: 0 0 0 3px;
+                background: transparent;
+                color: var(--ns-muted);
+                cursor: pointer;
+                font: inherit;
+                font-size: 10px;
+                text-align: left;
+            }
+
+            #${PANEL_ID} .ns-reply-ref:hover {
+                color: var(--ns-text);
+                border-bottom-color: var(--ns-name);
+            }
+
+            #${PANEL_ID} .ns-reply-author {
+                color: var(--ns-name);
+                font-weight: 700;
+                margin-left: 3px;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+
+            #${PANEL_ID} .ns-reply-ref.ns-reply-missing {
+                cursor: default;
+                color: var(--ns-muted);
+                border-left-color: var(--ns-muted);
+                opacity: .75;
+            }
+
+            #${PANEL_ID} .ns-reply-ref.ns-reply-missing:hover {
+                border-bottom-color: rgba(255,255,255,.18);
+            }
+
+            #${PANEL_ID} .ns-reply-target-highlight {
+                animation: nsReplyTargetFlash 1s ease-out;
+            }
+
+            @keyframes nsReplyTargetFlash {
+                0% {
+                    background: rgba(255, 208, 92, .30);
+                    box-shadow: 0 0 0 2px rgba(255, 208, 92, .48);
+                }
+                100% {
+                    background: transparent;
+                    box-shadow: 0 0 0 0 rgba(255, 208, 92, 0);
+                }
+            }
+            #${PANEL_ID} .ns-name:hover { text-decoration: underline; }
+            #${PANEL_ID} .ns-time { color: var(--ns-time); font-size: 9px; margin-left: auto; white-space: nowrap; }
+            #${PANEL_ID} .ns-faction { color: var(--ns-faction); font-size: 9px; }
+            #${PANEL_ID} .ns-text { color: var(--ns-message-text); white-space: pre-wrap; }
+            #${PANEL_ID} .ns-deleted .ns-text { color: var(--ns-muted); font-style: italic; }
+            #${PANEL_ID} .ns-mod-delete {
+                display: none;
+                width: 18px !important;
+                height: 18px !important;
+                padding: 0 !important;
+                border: 0 !important;
+                background: transparent !important;
+                color: #b9c0c7 !important;
+                font-size: 14px !important;
+                line-height: 16px !important;
+                cursor: pointer;
+                margin-left: 1px;
+            }
+            #${PANEL_ID} .ns-msg:hover .ns-mod-delete { display: inline-block; }
+            #${PANEL_ID} .ns-mod-delete:hover { color: #ff8d8d !important; }
+
+            #${PANEL_ID} .ns-link {
+                color: var(--ns-name);
+                text-decoration: underline;
+                overflow-wrap: anywhere;
+            }
+
+            #${PANEL_ID} .ns-link:hover {
+                filter: brightness(1.15);
+            }
+
+            #${PANEL_ID} .ns-custom-emoji {
+                display: inline-block;
+                width: 22px;
+                height: 22px;
+                margin: 0 1px;
+                object-fit: contain;
+                vertical-align: -5px;
+                user-select: none;
+            }
+
+            #${PANEL_ID} .ns-image-link {
+                display: block;
+                width: fit-content;
+                max-width: 100%;
+                margin: 5px 0 2px;
+                text-decoration: none;
+            }
+
+            #${PANEL_ID} .ns-image-preview {
+                display: block;
+                max-width: min(320px, 100%);
+                max-height: 240px;
+                border: 1px solid var(--ns-border);
+                border-radius: 5px;
+                background: rgba(0,0,0,.22);
+                object-fit: contain;
+                box-sizing: border-box;
+            }
+
+            #${PANEL_ID} .ns-image-fallback {
+                color: var(--ns-name);
+                text-decoration: underline;
+                overflow-wrap: anywhere;
+            }
+
+            /* Mentions are visually ordinary for people who are not the target. */
+            #${PANEL_ID} .ns-mention {
+                color: inherit;
+                background: transparent;
+                border: 0;
+                border-radius: 3px;
+                padding: 0;
+                font: inherit;
+                text-shadow: inherit;
+            }
+
+            #${PANEL_ID} .ns-mention-user {
+                cursor: pointer;
+            }
+
+            #${PANEL_ID} .ns-mention-user:hover {
+                text-decoration: underline;
+            }
+
+            /* Only the current user / current faction gets the highlight. */
+            #${PANEL_ID} .ns-mention-self {
+                padding: 0 3px;
+                border: 1px solid rgba(255, 208, 92, .68);
+                background: rgba(255, 190, 55, .18);
+                color: #ffe39a;
+                font-weight: 700;
+                text-decoration: none;
+            }
+
+            #${PANEL_ID} .ns-mention-menu {
+                position: absolute;
+                left: 6px;
+                right: 105px;
+                bottom: 49px;
+                z-index: 9;
+                display: none;
+                max-height: 210px;
+                overflow-y: auto;
+                padding: 4px;
+                box-sizing: border-box;
+                border: 1px solid var(--ns-border);
+                border-radius: 5px;
+                background: var(--ns-panel-bg);
+                box-shadow: 0 4px 16px rgba(0,0,0,.62);
+            }
+
+            #${PANEL_ID} .ns-mention-menu.ns-show {
+                display: block;
+            }
+
+            #${PANEL_ID} .ns-mention-option {
+                display: flex;
+                align-items: center;
+                gap: 7px;
+                width: 100%;
+                min-height: 34px;
+                padding: 5px 7px;
+                box-sizing: border-box;
+                border: 0;
+                border-radius: 4px;
+                background: transparent;
+                color: var(--ns-text);
+                cursor: pointer;
+                text-align: left;
+                font: inherit;
+            }
+
+            #${PANEL_ID} .ns-mention-option:hover,
+            #${PANEL_ID} .ns-mention-option.ns-selected {
+                background: rgba(255,255,255,.09);
+            }
+
+            #${PANEL_ID} .ns-mention-main {
+                min-width: 0;
+                flex: 1;
+                overflow: hidden;
+                white-space: nowrap;
+                text-overflow: ellipsis;
+                font-weight: 700;
+            }
+
+            #${PANEL_ID} .ns-mention-kind {
+                flex: 0 0 auto;
+                color: var(--ns-muted);
+                font-size: 9px;
+                white-space: nowrap;
+            }
+            #${PANEL_ID} .ns-title,
+            #${PANEL_ID} .ns-name,
+            #${PANEL_ID} .ns-text {
+                text-shadow: 0 1px 2px rgba(0,0,0,.85);
+            }
+            #${PANEL_ID} .ns-system { color: #a8b3be; font-style: italic; margin: 6px 0; }
+            #${PANEL_ID} .ns-error { color: #e58d8d; }
+            #${PANEL_ID} .ns-new-messages {
+                display: none;
+                align-self: center;
+                margin: 4px auto 0;
+                padding: 4px 9px;
+                border: 1px solid var(--ns-border);
+                border-radius: 12px;
+                background: var(--ns-accent);
+                color: #fff;
+                font-size: 10px;
+                line-height: 1.2;
+                cursor: pointer;
+                flex: 0 0 auto;
+            }
+            #${PANEL_ID} .ns-new-messages.ns-show { display: block; }
+            #${PANEL_ID} .ns-composer {
+                display: flex; align-items: flex-end; flex-wrap: wrap; gap: 5px;
+                padding: 6px; background: var(--ns-composer-bg); border-top: 1px solid #111;
+            }
+
+            #${PANEL_ID} .ns-reply-compose {
+                display: none;
+                align-items: center;
+                flex: 0 0 100%;
+                min-width: 0;
+                min-height: 22px;
+                padding: 0 2px 3px;
+                box-sizing: border-box;
+                color: var(--ns-muted);
+                font-size: 10px;
+            }
+
+            #${PANEL_ID} .ns-reply-compose.ns-show {
+                display: flex;
+            }
+
+            #${PANEL_ID} .ns-reply-compose-target {
+                min-width: 0;
+                flex: 1;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+                padding: 0;
+                border: 0;
+                background: transparent;
+                color: var(--ns-muted);
+                cursor: pointer;
+                font: inherit;
+                text-align: left;
+            }
+
+            #${PANEL_ID} .ns-reply-compose-target strong {
+                color: var(--ns-name);
+            }
+
+            #${PANEL_ID} .ns-reply-cancel {
+                width: 20px;
+                height: 20px;
+                padding: 0;
+                border: 0;
+                background: transparent;
+                color: var(--ns-muted);
+                cursor: pointer;
+                font-size: 15px;
+                line-height: 18px;
+            }
+
+            #${PANEL_ID} .ns-reply-cancel:hover {
+                color: #fff;
+            }
+            #${PANEL_ID} .ns-composer textarea {
+                flex: 1; resize: none; min-height: 34px; max-height: 90px;
+                border: 1px solid #111; border-radius: 3px; padding: 7px;
+                box-sizing: border-box; background: var(--ns-input-bg); color: #eee; outline: none;
+                font: inherit;
+            }
+            #${PANEL_ID} .ns-send {
+                width: 58px; min-width: 58px; height: 34px;
+                border: 1px solid #111; border-radius: 3px;
+                background: var(--ns-accent); color: #fff; cursor: pointer;
+                font-weight: 700;
+            }
+
+            #${PANEL_ID} .ns-emoji-button {
+                width: 34px;
+                min-width: 34px;
+                height: 34px;
+                border: 1px solid #111;
+                border-radius: 3px;
+                background: var(--ns-input-bg);
+                color: var(--ns-text);
+                cursor: pointer;
+                font-size: 18px;
+                line-height: 30px;
+                padding: 0;
+                touch-action: manipulation;
+            }
+
+            #${PANEL_ID} .ns-emoji-button:hover {
+                filter: brightness(1.15);
+            }
+
+            #${PANEL_ID} .ns-emoji-picker {
+                scrollbar-width: thin;
+                scrollbar-color: var(--ns-scroll-thumb) var(--ns-scroll-track);
+                position: absolute;
+                right: 70px;
+                bottom: 49px;
+                z-index: 8;
+                display: none;
+                width: 220px;
+                max-height: 180px;
+                overflow-y: auto;
+                grid-template-columns: repeat(6, 1fr);
+                gap: 4px;
+                padding: 7px;
+                box-sizing: border-box;
+                border: 1px solid var(--ns-border);
+                border-radius: 5px;
+                background: var(--ns-panel-bg);
+                box-shadow: 0 4px 16px rgba(0,0,0,.6);
+            }
+
+            #${PANEL_ID} .ns-emoji-picker.ns-show {
+                display: grid;
+            }
+
+            #${PANEL_ID} .ns-emoji-item {
+                width: 30px;
+                height: 30px;
+                padding: 0;
+                border: 0;
+                border-radius: 4px;
+                background: transparent;
+                color: var(--ns-text);
+                cursor: pointer;
+                font-size: 20px;
+                line-height: 30px;
+                text-align: center;
+                touch-action: manipulation;
+            }
+
+            #${PANEL_ID} .ns-emoji-item:hover {
+                background: rgba(255,255,255,.08);
+            }
+
+            #${PANEL_ID} .ns-custom-emoji-item img {
+                width: 24px;
+                height: 24px;
+                object-fit: contain;
+                vertical-align: middle;
+                pointer-events: none;
+            }
+
+            #${PANEL_ID} .ns-send:disabled { opacity: .45; cursor: default; }
+            #${PANEL_ID} .ns-manage-button {
+                display: none;
+                width: auto !important;
+                min-width: 0;
+                padding: 0 4px !important;
+                font-size: 10px !important;
+                font-weight: 700;
+                white-space: nowrap;
+            }
+            #${PANEL_ID} .ns-manage-button.ns-show { display: inline-block; }
+            #${PANEL_ID} .ns-manage {
+                position: absolute; inset: 38px 0 0 0; z-index: 12;
+                display: none; flex-direction: column;
+                box-sizing: border-box; background: var(--ns-panel-bg); color: var(--ns-text);
+            }
+            #${PANEL_ID} .ns-manage.ns-show { display: flex; }
+            #${PANEL_ID} .ns-manage-head {
+                min-height: 35px; display: flex; align-items: center; gap: 7px;
+                padding: 6px 8px; box-sizing: border-box;
+                border-bottom: 1px solid var(--ns-border); background: var(--ns-status-bg);
+            }
+            #${PANEL_ID} .ns-manage-title { flex: 1; font-weight: 700; color: #fff; }
+            #${PANEL_ID} .ns-manage-role { color: var(--ns-online); font-size: 10px; text-transform: capitalize; }
+            #${PANEL_ID} .ns-manage-close,
+            #${PANEL_ID} .ns-manage-refresh {
+                border: 1px solid var(--ns-border); border-radius: 3px;
+                background: var(--ns-input-bg); color: var(--ns-text); cursor: pointer;
+                padding: 4px 7px; font: inherit;
+            }
+            #${PANEL_ID} .ns-manage-controls {
+                display: flex; gap: 5px; padding: 7px; border-bottom: 1px solid var(--ns-border);
+            }
+            #${PANEL_ID} .ns-manage-search {
+                flex: 1; min-width: 0; padding: 6px; box-sizing: border-box;
+                border: 1px solid var(--ns-border); border-radius: 3px;
+                background: var(--ns-input-bg); color: var(--ns-text); outline: none;
+            }
+            #${PANEL_ID} .ns-manage-status { min-height: 17px; padding: 4px 8px; color: var(--ns-muted); font-size: 10px; }
+            #${PANEL_ID} .ns-manage-status.ns-error { color: #e58d8d; }
+            #${PANEL_ID} .ns-manage-scroll {
+                flex: 1;
+                overflow-y: auto;
+                padding: 0 7px 10px;
+                scrollbar-width: thin;
+                scrollbar-color: var(--ns-scroll-thumb) var(--ns-scroll-track);
+            }
+            #${PANEL_ID} .ns-manage-section-title {
+                margin: 8px 0 5px; color: #fff; font-size: 11px; font-weight: 700;
+            }
+            #${PANEL_ID} .ns-manage-member {
+                padding: 7px 0; border-bottom: 1px solid rgba(255,255,255,.07);
+            }
+            #${PANEL_ID} .ns-manage-member-top { display: flex; align-items: center; gap: 5px; }
+            #${PANEL_ID} .ns-manage-member-name { flex: 1; min-width: 0; font-weight: 700; color: var(--ns-name); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+            #${PANEL_ID} .ns-role-badge {
+                padding: 1px 5px; border: 1px solid var(--ns-border); border-radius: 8px;
+                color: var(--ns-online); font-size: 9px; text-transform: capitalize;
+            }
+            #${PANEL_ID} .ns-member-state { color: #e7b66a; font-size: 9px; }
+            #${PANEL_ID} .ns-manage-member-sub { color: var(--ns-muted); font-size: 9px; margin-top: 2px; }
+            #${PANEL_ID} .ns-manage-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+            #${PANEL_ID} .ns-manage-actions button,
+            #${PANEL_ID} .ns-manage-actions select {
+                min-height: 25px; border: 1px solid var(--ns-border); border-radius: 3px;
+                background: var(--ns-input-bg); color: var(--ns-text); font: inherit; font-size: 10px;
+            }
+            #${PANEL_ID} .ns-manage-actions button { cursor: pointer; padding: 3px 6px; }
+            #${PANEL_ID} .ns-manage-actions button.ns-danger { color: #ff9b9b; }
+            #${PANEL_ID} .ns-audit-entry {
+                padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,.06); color: var(--ns-text); font-size: 10px; line-height: 1.35;
+            }
+            #${PANEL_ID} .ns-audit-time { color: var(--ns-time); margin-right: 5px; }
+            #${PANEL_ID} .ns-login {
+                position: absolute; inset: 38px 0 0 0; z-index: 3;
+                display: none; flex-direction: column; padding: 14px;
+                box-sizing: border-box; background: #22262a; color: var(--ns-text);
+            }
+            #${PANEL_ID} .ns-login.ns-show { display: flex; }
+            #${PANEL_ID} .ns-login h3 { margin: 0 0 10px; color: #fff; font-size: 14px; }
+            #${PANEL_ID} .ns-login p { margin: 0 0 10px; line-height: 1.4; }
+            #${PANEL_ID} .ns-login input {
+                padding: 8px; background: #151719; color: #eee; border: 1px solid #555;
+                border-radius: 3px; outline: none;
+            }
+            #${PANEL_ID} .ns-login button {
+                margin-top: 8px; padding: 8px; border: 1px solid #111; border-radius: 3px;
+                background: var(--ns-accent); color: #fff; cursor: pointer;
+            }
+            #${PANEL_ID} .ns-login-note { margin-top: 10px !important; color: #8f979e; font-size: 10px; }
+            #${PANEL_ID} .ns-api-table { width: 100%; border-collapse: collapse; margin: 2px 0 8px; font-size: 10px; }
+            #${PANEL_ID} .ns-api-table th, #${PANEL_ID} .ns-api-table td { border: 1px solid #444; padding: 4px; text-align: left; vertical-align: top; }
+            #${PANEL_ID} .ns-api-table th { color: #fff; background: #1b1e21; }
+            #${PANEL_ID} .ns-api-table td { color: #b9c0c7; }
+            #${PANEL_ID} .ns-login-error { min-height: 15px; color: #e58d8d; margin-top: 8px; }
+            #${PANEL_ID} .ns-login-actions { display: flex; flex-direction: column; gap: 7px; }
+            #${PANEL_ID} .ns-login-label { color: #c7cdd3; font-size: 10px; margin-top: 2px; }
+            #${PANEL_ID} details.ns-privacy {
+                margin-top: 10px; padding-top: 8px; border-top: 1px solid #3a3e43;
+                color: #9fa7ae; font-size: 10px;
+            }
+            #${PANEL_ID} details.ns-privacy summary {
+                cursor: pointer; color: var(--ns-online); user-select: none;
+            }
+            #${PANEL_ID} .ns-privacy-body { margin-top: 7px; line-height: 1.4; }
+            #${PANEL_ID} .ns-privacy-body p { margin: 0 0 7px; }
+            #${PANEL_ID} .ns-privacy-body strong { color: #d6dbe0; }
+
+            #${PANEL_ID}[data-theme="almanac"] {
+                --ns-panel-bg: #071321;
+                --ns-body-bg: #081a2d;
+                --ns-header-top: #0c3150;
+                --ns-header-bottom: #071827;
+                --ns-status-bg: #07121f;
+                --ns-composer-bg: #07111c;
+                --ns-input-bg: #091827;
+                --ns-border: #0a6ea3;
+                --ns-text: #d9f4ff;
+                --ns-message-text: #e6f7ff;
+                --ns-muted: #7fa7b8;
+                --ns-online: #22c9ff;
+                --ns-name: #11c6ff;
+                --ns-faction: #6d9fb2;
+                --ns-time: #6c8794;
+                --ns-accent: #067fb8;
+                --ns-scroll-track: #06111c;
+                --ns-scroll-thumb: #00aee8;
+                --ns-scroll-thumb-hover: #31d4ff;
+            }
+
+            #${PANEL_ID}[data-theme="flux"] {
+                --ns-panel-bg: #100818;
+                --ns-body-bg: #12091d;
+                --ns-header-top: #29103d;
+                --ns-header-bottom: #13091f;
+                --ns-status-bg: #110719;
+                --ns-composer-bg: #0e0715;
+                --ns-input-bg: #170b22;
+                --ns-border: #6f2296;
+                --ns-text: #f1e5ff;
+                --ns-message-text: #f5efff;
+                --ns-muted: #aa8cb7;
+                --ns-online: #28e4f1;
+                --ns-name: #30e2ef;
+                --ns-faction: #c24ae6;
+                --ns-time: #8d7b98;
+                --ns-accent: #70269c;
+                --ns-scroll-track: #0b0610;
+                --ns-scroll-thumb: #9e2ccc;
+                --ns-scroll-thumb-hover: #d53eff;
+            }
+
+            #${PANEL_ID} .ns-settings {
+                position: absolute;
+                top: 42px;
+                right: 8px;
+                z-index: 5;
+                display: none;
+                width: 180px;
+                padding: 10px;
+                box-sizing: border-box;
+                border: 1px solid var(--ns-border);
+                border-radius: 4px;
+                background: var(--ns-panel-bg);
+                box-shadow: 0 4px 14px rgba(0,0,0,.55);
+                color: var(--ns-text);
+            }
+            #${PANEL_ID} .ns-settings.ns-show { display: block; }
+            #${PANEL_ID} .ns-settings-title { font-weight: 700; margin-bottom: 8px; }
+            #${PANEL_ID} .ns-settings-label { font-size: 10px; color: var(--ns-muted); margin-bottom: 4px; }
+            #${PANEL_ID} .ns-settings-label.ns-settings-label-spaced { margin-top: 10px; }
+            #${PANEL_ID} .ns-theme-select,
+            #${PANEL_ID} .ns-image-preview-select {
+                width: 100%;
+                padding: 6px;
+                border: 1px solid var(--ns-border);
+                border-radius: 3px;
+                background: var(--ns-input-bg);
+                color: var(--ns-text);
+                outline: none;
+            }
+
+            #${PANEL_ID} .ns-signout {
+                width: 100%;
+                margin-top: 12px;
+                padding: 7px;
+                box-sizing: border-box;
+                border: 1px solid rgba(229, 141, 141, .65);
+                border-radius: 3px;
+                background: rgba(120, 35, 35, .18);
+                color: #ffb1b1;
+                cursor: pointer;
+                font: inherit;
+                font-weight: 700;
+            }
+
+            #${PANEL_ID} .ns-signout:hover {
+                background: rgba(140, 40, 40, .28);
+                color: #ffd0d0;
+            }
+
+            #${PANEL_ID} .ns-image-deferred {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                max-width: 100%;
+                margin: 4px 0 2px;
+            }
+
+            #${PANEL_ID} .ns-image-deferred .ns-link {
+                min-width: 0;
+                flex: 1;
+                overflow-wrap: anywhere;
+            }
+
+            #${PANEL_ID} .ns-load-image {
+                flex: 0 0 auto;
+                min-height: 24px;
+                padding: 3px 7px;
+                border: 1px solid var(--ns-border);
+                border-radius: 3px;
+                background: var(--ns-input-bg);
+                color: var(--ns-text);
+                cursor: pointer;
+                font: inherit;
+                font-size: 10px;
+                white-space: nowrap;
+            }
+
+            #${PANEL_ID} .ns-load-image:hover {
+                filter: brightness(1.15);
+            }
+
+            #${PANEL_ID} .ns-mobile-size { display: none; }
+
+            @media (max-width: 700px) {
+                #${PANEL_ID} {
+                    width: calc(100vw - 12px) !important;
+                    height: min(65dvh, 520px);
+                    min-width: 0;
+                    min-height: 240px;
+                    max-width: none;
+                    max-height: calc(100dvh - 12px);
+                    left: 6px !important;
+                    right: auto !important;
+                    top: auto;
+                    bottom: 6px;
+                    resize: none;
+                    border-radius: 8px;
+                }
+                #${PANEL_ID}.ns-mobile-expanded { height: calc(100dvh - 12px); }
+                #${PANEL_ID} .ns-header {
+                    height: 44px; min-height: 44px; cursor: default;
+                    padding: 0 6px 0 9px; gap: 4px;
+                }
+                #${PANEL_ID} .ns-header button {
+                    width: 32px; height: 32px; font-size: 18px; line-height: 28px;
+                    touch-action: manipulation;
+                }
+
+                #${PANEL_ID} .ns-online {
+                    font-size: 9px;
+                    max-width: 58px;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                }
+
+                #${PANEL_ID} .ns-online.ns-update {
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: center;
+                    min-width: 52px;
+                    max-width: none;
+                    height: 26px;
+                    padding: 0 7px;
+                    box-sizing: border-box;
+                    border: 1px solid var(--ns-online);
+                    border-radius: 4px;
+                    background: rgba(0,0,0,.28);
+                    color: var(--ns-online);
+                    text-decoration: none;
+                    font-size: 10px;
+                    line-height: 1;
+                    touch-action: manipulation;
+                }
+
+                #${PANEL_ID} .ns-mobile-size { display: inline-block; }
+                #${PANEL_ID} .ns-status { min-height: 24px; padding: 5px 8px; }
+                #${PANEL_ID} .ns-body {
+                    -webkit-overflow-scrolling: touch;
+                    overscroll-behavior: contain;
+                }
+                #${PANEL_ID} .ns-composer {
+                    padding: 8px; gap: 7px;
+                    padding-bottom: max(8px, env(safe-area-inset-bottom));
+                }
+
+                #${PANEL_ID} .ns-reply-button {
+                    opacity: 1;
+                    pointer-events: auto;
+                }
+
+                #${PANEL_ID}.ns-has-reply .ns-emoji-picker,
+                #${PANEL_ID}.ns-has-reply .ns-mention-menu {
+                    bottom: 84px;
+                }
+                #${PANEL_ID} .ns-composer textarea {
+                    min-height: 42px; max-height: 84px; padding: 9px;
+                    font-size: 16px; line-height: 1.25;
+                }
+                #${PANEL_ID} .ns-send {
+                    width: 64px; min-width: 64px; height: 42px; font-size: 13px;
+                    touch-action: manipulation;
+                }
+
+                #${PANEL_ID} .ns-emoji-button {
+                    width: 42px;
+                    min-width: 42px;
+                    height: 42px;
+                    font-size: 20px;
+                    line-height: 38px;
+                }
+
+                #${PANEL_ID} .ns-emoji-picker {
+                    right: 8px;
+                    bottom: 60px;
+                    width: min(260px, calc(100vw - 28px));
+                    max-height: 200px;
+                    grid-template-columns: repeat(6, 1fr);
+                }
+
+                #${PANEL_ID} .ns-image-preview {
+                    max-width: 100%;
+                    max-height: 35dvh;
+                }
+
+                #${PANEL_ID} .ns-mention-menu {
+                    left: 8px;
+                    right: 8px;
+                    bottom: 60px;
+                    max-height: min(240px, 36dvh);
+                }
+                #${PANEL_ID} .ns-settings {
+                    top: 48px; right: 6px; width: min(220px, calc(100vw - 24px));
+                }
+                #${PANEL_ID} .ns-login {
+                    inset: 44px 0 0 0; overflow-y: auto;
+                    padding-bottom: max(14px, env(safe-area-inset-bottom));
+                }
+            }
+
+            #${LAUNCHER_ID} {
+                width: 40px; height: 40px; border: 1px solid #111; border-radius: 4px;
+                background: linear-gradient(#405d79, #27394b); color: white; cursor: pointer;
+                font: bold 11px Arial, sans-serif; position: relative;
+                box-shadow: inset 0 1px rgba(255,255,255,.08);
+            }
+            #${LAUNCHER_ID}:hover { filter: brightness(1.15); }
+            #${LAUNCHER_ID} .ns-badge {
+                display: none; position: absolute; top: -7px; right: -7px;
+                min-width: 20px; height: 20px; padding: 0 5px; border-radius: 10px;
+                background: #b33; color: white; font: bold 11px/20px Arial, sans-serif;
+                box-sizing: border-box;
+                border: 2px solid #202225;
+                box-shadow: 0 1px 4px rgba(0,0,0,.6);
+            }
+            #${LAUNCHER_ID} .ns-badge.ns-show { display: block; }
+            #${LAUNCHER_ID} .ns-badge.ns-mention-badge {
+                min-width: 25px;
+                background: #9a5b17;
+                box-shadow: 0 0 0 2px rgba(255, 208, 92, .68), 0 1px 4px rgba(0,0,0,.6);
+            }
+            .ns-launcher-floating {
+                position: fixed !important; right: 5px; bottom: 120px; z-index: 999999;
+            }
+
+            /* On mobile, NS must follow Torn's grouped-chat UI rather than
+               falling back to a detached floating launcher at the right edge. */
+            @media (max-width: 700px) {
+                #${LAUNCHER_ID}.ns-launcher-floating,
+                .ns-launcher-floating #${LAUNCHER_ID} {
+                    display: none !important;
+                }
+            }
+        `;
+        document.head.appendChild(style);
+    }
+
+    function el(tag, cls, text) {
+        const node = document.createElement(tag);
+        if (cls) node.className = cls;
+        if (text !== undefined) node.textContent = text;
+        return node;
+    }
+
+    function loadUiState() {
+        const saved = GM_getValue(UI_STATE_KEY, null);
+        if (!saved || typeof saved !== 'object') {
+            return {
+                visible: false,
+                minimized: false,
+                mobileExpanded: false
+            };
+        }
+
+        return {
+            visible: !!saved.visible,
+            minimized: !!saved.minimized,
+            mobileExpanded: !!saved.mobileExpanded
+        };
+    }
+
+    function themeImageValue(url) {
+        if (!url) return 'none';
+        const escaped = String(url).replace(/["\\]/g, '\\$&');
+        return `url("${escaped}")`;
+    }
+
+    function applyTheme(theme, persist = true) {
+        const nextTheme = THEMES.has(theme) ? theme : 'default';
+        state.theme = nextTheme;
+
+        if (ui.panel) {
+            ui.panel.dataset.theme = nextTheme;
+            const assets = THEME_ASSETS[nextTheme] || {};
+            ui.panel.style.setProperty('--ns-theme-header-image', themeImageValue(assets.header));
+            ui.panel.style.setProperty('--ns-theme-bg-image', themeImageValue(assets.background));
+        }
+
+        if (ui.themeSelect && ui.themeSelect.value !== nextTheme) {
+            ui.themeSelect.value = nextTheme;
+        }
+
+        if (persist) GM_setValue(THEME_KEY, nextTheme);
+    }
+
+    function saveUiState(partial = {}) {
+        GM_setValue(UI_STATE_KEY, { ...loadUiState(), ...partial });
+    }
+
+    function loadDesktopGeometry() {
+        const saved = GM_getValue(DESKTOP_GEOMETRY_KEY, null);
+
+        if (
+            saved &&
+            typeof saved === 'object' &&
+            Number.isFinite(saved.left) &&
+            Number.isFinite(saved.top) &&
+            Number.isFinite(saved.width) &&
+            Number.isFinite(saved.height)
+        ) {
+            return {
+                left: saved.left,
+                top: saved.top,
+                width: saved.width,
+                height: saved.height
+            };
+        }
+
+        // One-time migration from versions that stored desktop geometry
+        // inside the generic UI state object.
+        const legacy = GM_getValue(UI_STATE_KEY, null);
+        if (
+            legacy &&
+            typeof legacy === 'object' &&
+            Number.isFinite(legacy.left) &&
+            Number.isFinite(legacy.top) &&
+            Number.isFinite(legacy.width) &&
+            Number.isFinite(legacy.height)
+        ) {
+            const migrated = {
+                left: legacy.left,
+                top: legacy.top,
+                width: legacy.width,
+                height: legacy.height
+            };
+            GM_setValue(DESKTOP_GEOMETRY_KEY, migrated);
+            return migrated;
+        }
+
+        return null;
+    }
+
+    function writeDesktopGeometry(geometry) {
+        if (
+            !geometry ||
+            !Number.isFinite(geometry.left) ||
+            !Number.isFinite(geometry.top) ||
+            !Number.isFinite(geometry.width) ||
+            !Number.isFinite(geometry.height)
+        ) {
+            return false;
+        }
+
+        GM_setValue(DESKTOP_GEOMETRY_KEY, {
+            left: Math.round(geometry.left),
+            top: Math.round(geometry.top),
+            width: Math.round(geometry.width),
+            height: Math.round(geometry.height)
+        });
+        return true;
+    }
+
+    function readDesktopGeometryFromPanel() {
+        if (!ui.panel || isMobileLayout()) return null;
+
+        const panel = ui.panel;
+        if (!panel.classList.contains('ns-visible')) return null;
+        if (panel.classList.contains('ns-minimized')) return null;
+
+        const rect = panel.getBoundingClientRect();
+        if (rect.width < 260 || rect.height < 220) return null;
+
+        return {
+            left: Math.round(rect.left),
+            top: Math.round(rect.top),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height)
+        };
+    }
+
+    function saveDesktopGeometry() {
+        const geometry = readDesktopGeometryFromPanel();
+        if (!geometry) return false;
+        return writeDesktopGeometry(geometry);
+    }
+
+    function saveCurrentPanelGeometry() {
+        return saveDesktopGeometry();
+    }
+
+    function restoreDesktopGeometry(saved = loadDesktopGeometry()) {
+        if (!ui.panel || isMobileLayout() || !saved) return false;
+
+        const panel = ui.panel;
+
+        const width = Math.max(
+            260,
+            Math.min(saved.width, Math.max(260, window.innerWidth - 16))
+        );
+        const height = Math.max(
+            220,
+            Math.min(saved.height, Math.max(220, window.innerHeight - 16))
+        );
+
+        panel.style.width = `${width}px`;
+        panel.style.height = `${height}px`;
+
+        const pos = clampPanelPosition(panel, saved.left, saved.top);
+        panel.style.left = `${pos.left}px`;
+        panel.style.top = `${pos.top}px`;
+        panel.style.right = 'auto';
+        panel.style.bottom = 'auto';
+        panel.dataset.dragged = '1';
+
+        return true;
+    }
+
+    function applySyncedUiState(saved) {
+        if (!ui.panel || !saved || typeof saved !== 'object') return;
+
+        const panel = ui.panel;
+        panel.dataset.syncingUi = '1';
+
+        if (isMobileLayout()) {
+            panel.classList.toggle('ns-mobile-expanded', !!saved.mobileExpanded);
+
+            if (ui.mobileSizeButton) {
+                const expanded = panel.classList.contains('ns-mobile-expanded');
+                ui.mobileSizeButton.textContent = expanded ? '▣' : '⛶';
+                ui.mobileSizeButton.title = expanded ? 'Compact chat' : 'Expand chat';
+            }
+
+            updateMobileViewport();
+        }
+
+        panel.classList.remove('ns-minimized');
+
+        if (saved.visible) {
+            panel.classList.add('ns-visible');
+
+            // Only initialize networking immediately if this Torn tab is active.
+            // Unfocused/hidden tabs keep the UI state in sync without making requests.
+            if (isPageActive()) {
+                startIfNeeded();
+            }
+        } else {
+            panel.classList.remove('ns-visible');
+            schedulePoll(POLL_CLOSED_MS);
+        }
+
+        // Prevent ResizeObserver from reflecting the remote change straight back
+        // into GM storage and creating a cross-tab feedback loop.
+        setTimeout(() => {
+            if (panel) delete panel.dataset.syncingUi;
+        }, 300);
+    }
+
+    function clampPanelPosition(panel, left, top) {
+        const maxLeft = Math.max(0, window.innerWidth - panel.offsetWidth);
+        const maxTop = Math.max(0, window.innerHeight - 38);
+        return {
+            left: Math.min(maxLeft, Math.max(0, left)),
+            top: Math.min(maxTop, Math.max(0, top))
+        };
+    }
+
+    function currentUserscriptVersion() {
+        return String(
+            globalThis.GM_info?.script?.version ||
+            '0.1.61'
+        );
+    }
+
+    function compareVersions(a, b) {
+        const pa = String(a || '').split('.').map(part => Number.parseInt(part, 10) || 0);
+        const pb = String(b || '').split('.').map(part => Number.parseInt(part, 10) || 0);
+        const length = Math.max(pa.length, pb.length);
+
+        for (let i = 0; i < length; i++) {
+            const av = pa[i] || 0;
+            const bv = pb[i] || 0;
+            if (av > bv) return 1;
+            if (av < bv) return -1;
+        }
+        return 0;
+    }
+
+    function renderConnectionState(label = 'Connected') {
+        if (!ui.online) return;
+
+        if (state.updateAvailable) {
+            ui.online.textContent = 'Update';
+            ui.online.classList.add('ns-update');
+            ui.online.title = `Version ${state.updateAvailable} available — click to update`;
+            return;
+        }
+
+        ui.online.classList.remove('ns-update');
+        ui.online.removeAttribute('title');
+        ui.online.textContent = label;
+    }
+
+    function openUserscriptUpdate() {
+        window.open(UPDATE_URL, '_blank', 'noopener,noreferrer');
+    }
+
+    async function checkForUserscriptUpdate(force = false) {
+        const now = Date.now();
+        const saved = GM_getValue(UPDATE_CHECK_KEY, null);
+
+        if (
+            !force &&
+            saved &&
+            typeof saved === 'object' &&
+            Number.isFinite(saved.checkedAt) &&
+            now - saved.checkedAt < UPDATE_CHECK_INTERVAL_MS
+        ) {
+            const cachedVersion = String(saved.latestVersion || '');
+            state.updateAvailable =
+                cachedVersion && compareVersions(cachedVersion, currentUserscriptVersion()) > 0
+                    ? cachedVersion
+                    : '';
+            GM_setValue(UPDATE_AVAILABLE_KEY, state.updateAvailable);
+            renderConnectionState();
+            return;
+        }
+
+        try {
+            const source = await new Promise((resolve, reject) => {
+                GM.xmlHttpRequest({
+                    method: 'GET',
+                    url: `${UPDATE_URL}?t=${now}`,
+                    headers: {
+                        'Cache-Control': 'no-cache'
+                    },
+                    responseType: 'text',
+                    onload: response => {
+                        if (response.status >= 200 && response.status < 300) {
+                            resolve(response.responseText || '');
+                        } else {
+                            reject(new Error(`Update check HTTP ${response.status}`));
+                        }
+                    },
+                    onerror: () => reject(new Error('Update check failed')),
+                    onabort: () => reject(new Error('Update check aborted')),
+                    ontimeout: () => reject(new Error('Update check timed out'))
+                });
+            });
+
+            const match = source.match(/^\s*\/\/\s*@version\s+([^\s]+)\s*$/m);
+            const latestVersion = match ? match[1].trim() : '';
+
+            GM_setValue(UPDATE_CHECK_KEY, {
+                checkedAt: now,
+                latestVersion
+            });
+
+            state.updateAvailable =
+                latestVersion && compareVersions(latestVersion, currentUserscriptVersion()) > 0
+                    ? latestVersion
+                    : '';
+
+            GM_setValue(UPDATE_AVAILABLE_KEY, state.updateAvailable);
+            renderConnectionState();
+        } catch (_) {
+            // Update checking should never interfere with chat operation.
+        }
+    }
+
+    function normalizeMentionDirectory(directory) {
+        const input = directory && typeof directory === 'object' ? directory : {};
+        const users = Array.isArray(input.users) ? input.users : [];
+        const factions = Array.isArray(input.factions) ? input.factions : [];
+
+        state.mentionDirectory = {
+            users: users
+                .filter(user => Number(user?.id) > 0 && String(user?.name || '').trim())
+                .map(user => ({
+                    type: 'user',
+                    id: Number(user.id),
+                    name: String(user.name).trim(),
+                    mention: String(user.mention || user.name).trim(),
+                    factionId: Number(user.faction_id || 0),
+                    factionName: String(user.faction_name || '').trim(),
+                })),
+            factions: factions
+                .filter(faction => Number(faction?.id) > 0 && String(faction?.name || '').trim())
+                .map(faction => ({
+                    type: 'faction',
+                    id: Number(faction.id),
+                    name: String(faction.name).trim(),
+                    mention: String(faction.mention || faction.name).trim(),
+                })),
+        };
+
+        for (const faction of state.mentionDirectory.factions) {
+            state.factionNames[String(faction.id)] = faction.name;
+        }
+    }
+
+    function mentionCandidates() {
+        const factions = state.mentionDirectory.factions.map(faction => ({
+            type: 'faction',
+            id: faction.id,
+            label: faction.mention,
+            search: `${faction.mention} ${faction.name}`.toLowerCase(),
+            detail: 'Faction',
+        }));
+
+        const users = state.mentionDirectory.users.map(user => ({
+            type: 'user',
+            id: user.id,
+            label: user.name,
+            search: `${user.name} ${user.factionName}`.toLowerCase(),
+            detail: user.factionName || state.factionNames[String(user.factionId)] || 'Member',
+        }));
+
+        return [...factions, ...users];
+    }
+
+    function mentionContext(textarea) {
+        const caret = textarea.selectionStart ?? textarea.value.length;
+        const before = textarea.value.slice(0, caret);
+
+        // Mentions intentionally support only known users/factions. There is no
+        // @everyone or @here special case.
+        const match = before.match(/(^|[\s([{])@([A-Za-z0-9_-]*)$/);
+        if (!match) return null;
+
+        const query = match[2] || '';
+        return {
+            start: caret - query.length - 1,
+            end: caret,
+            query,
+        };
+    }
+
+    function closeMentionMenu() {
+        state.mentionSuggestions = [];
+        state.mentionSelection = 0;
+        ui.mentionMenu?.classList.remove('ns-show');
+        if (ui.mentionMenu) ui.mentionMenu.textContent = '';
+    }
+
+    function renderMentionMenu() {
+        if (!ui.mentionMenu) return;
+
+        const context = mentionContext(ui.textarea);
+        if (!context) {
+            closeMentionMenu();
+            return;
+        }
+
+        const query = context.query.toLowerCase();
+        const candidates = mentionCandidates()
+            .filter(item => !query || item.search.includes(query))
+            .sort((a, b) => {
+                const aStarts = a.label.toLowerCase().startsWith(query) ? 0 : 1;
+                const bStarts = b.label.toLowerCase().startsWith(query) ? 0 : 1;
+                if (aStarts !== bStarts) return aStarts - bStarts;
+                if (a.type !== b.type) return a.type === 'faction' ? -1 : 1;
+                return a.label.localeCompare(b.label);
+            })
+            .slice(0, 8);
+
+        state.mentionSuggestions = candidates;
+        if (state.mentionSelection >= candidates.length) state.mentionSelection = 0;
+
+        ui.mentionMenu.textContent = '';
+
+        if (!candidates.length) {
+            ui.mentionMenu.classList.remove('ns-show');
+            return;
+        }
+
+        candidates.forEach((item, index) => {
+            const option = el(
+                'button',
+                `ns-mention-option${index === state.mentionSelection ? ' ns-selected' : ''}`
+            );
+            option.type = 'button';
+
+            const main = el('span', 'ns-mention-main', `@${item.label}`);
+            const kind = el('span', 'ns-mention-kind', item.detail);
+            option.append(main, kind);
+
+            option.addEventListener('mousedown', event => {
+                // Keep textarea selection/caret intact until the choice is inserted.
+                event.preventDefault();
+            });
+
+            option.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                insertMentionSuggestion(item);
+            });
+
+            ui.mentionMenu.appendChild(option);
+        });
+
+        ui.mentionMenu.classList.add('ns-show');
+    }
+
+    function insertMentionSuggestion(item) {
+        const context = mentionContext(ui.textarea);
+        if (!context || !item) return;
+
+        const before = ui.textarea.value.slice(0, context.start);
+        const after = ui.textarea.value.slice(context.end);
+        const visibleMention = `@${item.label} `;
+
+        ui.textarea.value = `${before}${visibleMention}${after}`;
+        const caret = before.length + visibleMention.length;
+        ui.textarea.focus();
+        ui.textarea.setSelectionRange(caret, caret);
+        ui.textarea.dispatchEvent(new Event('input', { bubbles: true }));
+        closeMentionMenu();
+    }
+
+    function encodeMentions(text) {
+        const factionMap = new Map();
+        for (const faction of state.mentionDirectory.factions) {
+            factionMap.set(String(faction.mention).toLowerCase(), faction);
+        }
+
+        const userMap = new Map();
+        for (const user of state.mentionDirectory.users) {
+            userMap.set(String(user.name).toLowerCase(), user);
+        }
+
+        return String(text || '').replace(
+            /(^|[\s([{])@([A-Za-z0-9_-]+)/g,
+            (match, prefix, rawName) => {
+                const key = rawName.toLowerCase();
+
+                // Faction aliases intentionally win exact collisions, making
+                // @Almanac / @NS deterministic group tags.
+                const faction = factionMap.get(key);
+                if (faction) {
+                    const fallback = String(faction.mention).replace(/[^A-Za-z0-9_-]/g, '');
+                    return `${prefix}<@f:${faction.id}:${fallback}>`;
+                }
+
+                const user = userMap.get(key);
+                if (user) {
+                    const fallback = String(user.name).replace(/[^A-Za-z0-9_-]/g, '');
+                    return `${prefix}<@u:${user.id}:${fallback}>`;
+                }
+
+                // Unknown mentions, including @everyone and @here, remain plain text.
+                return match;
+            }
+        );
+    }
+
+    function normalizeCustomEmojiUrl(rawUrl) {
+        try {
+            const base = new URL(API_BASE);
+            const url = new URL(String(rawUrl || ''), `${API_BASE}/assets/emojis/`);
+
+            // Custom emoji is deliberately restricted to our own static emoji
+            // directory. The manifest cannot turn Naughty Souls Chat into an arbitrary
+            // third-party image loader.
+            if (url.protocol !== 'https:') return '';
+            if (url.origin !== base.origin) return '';
+            if (!url.pathname.startsWith('/assets/emojis/')) return '';
+            if (!DIRECT_IMAGE_EXTENSIONS.test(url.pathname)) return '';
+
+            return url.href;
+        } catch (_) {
+            return '';
+        }
+    }
+
+    function parseCustomEmojiManifest(data) {
+        const entries = [];
+
+        if (Array.isArray(data?.emojis)) {
+            for (const item of data.emojis) {
+                if (!item || typeof item !== 'object') continue;
+                entries.push([item.name, item.url]);
+            }
+        } else if (data?.emojis && typeof data.emojis === 'object') {
+            entries.push(...Object.entries(data.emojis));
+        } else if (data && typeof data === 'object' && !Array.isArray(data)) {
+            entries.push(...Object.entries(data));
+        }
+
+        const result = new Map();
+
+        for (const [rawName, rawUrl] of entries) {
+            if (result.size >= CUSTOM_EMOJI_MAX) break;
+
+            const name = String(rawName || '').trim().toLowerCase();
+            if (!CUSTOM_EMOJI_NAME_PATTERN.test(name)) continue;
+
+            // Preserve the existing native shortcode meanings such as :fire:.
+            if (Object.prototype.hasOwnProperty.call(EMOJI_SHORTCODES, name)) continue;
+
+            const url = normalizeCustomEmojiUrl(rawUrl);
+            if (!url) continue;
+
+            result.set(name, url);
+        }
+
+        return result;
+    }
+
+    function refreshCustomEmojiPicker() {
+        if (!ui.emojiPicker || !ui.textarea) return;
+
+        ui.emojiPicker
+            .querySelectorAll('.ns-custom-emoji-item')
+            .forEach(node => node.remove());
+
+        for (const [name, url] of [...state.customEmojis.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+            const item = el('button', 'ns-emoji-item ns-custom-emoji-item');
+            item.type = 'button';
+            item.title = `:${name}:`;
+
+            const img = document.createElement('img');
+            img.src = url;
+            img.alt = `:${name}:`;
+            img.loading = 'lazy';
+            img.decoding = 'async';
+            img.referrerPolicy = 'no-referrer';
+            img.draggable = false;
+
+            item.appendChild(img);
+            item.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                insertTextAtCursor(ui.textarea, `:${name}:`);
+                ui.emojiPicker.classList.remove('ns-show');
+            });
+
+            ui.emojiPicker.appendChild(item);
+        }
+    }
+
+    async function loadCustomEmojiManifest() {
+        try {
+            // /assets/ is normally cached aggressively. A five-minute query bucket
+            // lets manifest edits propagate promptly without disabling image caching.
+            const bucket = Math.floor(Date.now() / (5 * 60 * 1000));
+            const data = await apiRaw(
+                `${CUSTOM_EMOJI_MANIFEST_PATH}?v=${bucket}`,
+                {
+                    skipAuth: true,
+                    timeout: CUSTOM_EMOJI_MANIFEST_TIMEOUT_MS,
+                }
+            );
+
+            state.customEmojis = parseCustomEmojiManifest(data);
+        } catch (_) {
+            // Custom emoji is optional. A missing/invalid manifest must never stop chat.
+            state.customEmojis = new Map();
+        }
+
+        refreshCustomEmojiPicker();
+        return state.customEmojis;
+    }
+
+    function ensureCustomEmojiReady() {
+        if (!state.customEmojiReadyPromise) {
+            state.customEmojiReadyPromise = loadCustomEmojiManifest();
+        }
+        return state.customEmojiReadyPromise;
+    }
+
+    function createCustomEmojiNode(name, url) {
+        const img = document.createElement('img');
+        img.className = 'ns-custom-emoji';
+        img.src = url;
+        img.alt = `:${name}:`;
+        img.title = `:${name}:`;
+        img.loading = 'lazy';
+        img.decoding = 'async';
+        img.referrerPolicy = 'no-referrer';
+        img.draggable = false;
+
+        img.addEventListener('error', () => {
+            if (img.isConnected) {
+                img.replaceWith(document.createTextNode(`:${name}:`));
+            }
+        }, { once: true });
+
+        return img;
+    }
+
+    function trimUrlTrailingPunctuation(rawUrl) {
+        let urlText = String(rawUrl || '');
+        let trailing = '';
+
+        // Chat prose commonly ends a URL with punctuation. Keep that punctuation
+        // outside the clickable/preview URL instead of requesting it as part of it.
+        while (/[.,!?;:)\]}]$/.test(urlText)) {
+            trailing = urlText.slice(-1) + trailing;
+            urlText = urlText.slice(0, -1);
+        }
+
+        return { urlText, trailing };
+    }
+
+    function createExternalImagePreviewNode(rawUrl, url) {
+        const link = el('a', 'ns-image-link');
+        link.href = url.href;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.referrerPolicy = 'no-referrer';
+        link.title = url.href;
+        link.dataset.externalImageUrl = url.href;
+        link.dataset.externalImageRaw = rawUrl;
+
+        const img = document.createElement('img');
+        img.className = 'ns-image-preview';
+        img.src = url.href;
+        img.alt = 'Image preview';
+        img.loading = 'lazy';
+        img.decoding = 'async';
+        img.referrerPolicy = 'no-referrer';
+        img.draggable = false;
+
+        // If hotlinking is blocked or the URL is no longer an image, keep a
+        // normal clickable link rather than leaving a broken-image icon.
+        img.addEventListener('error', () => {
+            if (!link.isConnected) return;
+            link.className = 'ns-link';
+            link.replaceChildren(el('span', 'ns-image-fallback', rawUrl));
+        }, { once: true });
+
+        link.appendChild(img);
+        return link;
+    }
+
+    function createDeferredImageNode(rawUrl, url) {
+        const wrap = el('span', 'ns-image-deferred');
+        wrap.dataset.externalImageUrl = url.href;
+        wrap.dataset.externalImageRaw = rawUrl;
+
+        const link = el('a', 'ns-link', rawUrl);
+        link.href = url.href;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.referrerPolicy = 'no-referrer';
+        link.title = url.href;
+
+        const load = el('button', 'ns-load-image', 'Load image');
+        load.type = 'button';
+        load.title = 'Load this image from the external host';
+
+        load.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+
+            // This is the first point where the browser requests the image when
+            // automatic external previews are disabled.
+            const preview = createExternalImagePreviewNode(rawUrl, url);
+            wrap.replaceWith(preview);
+        });
+
+        wrap.append(link, load);
+        return wrap;
+    }
+
+    function createHttpsLinkNode(rawUrl, forceImagePreview = false) {
+        let url;
+        try {
+            url = new URL(rawUrl);
+        } catch (_) {
+            return null;
+        }
+
+        if (url.protocol !== 'https:') return null;
+
+        const isImage = DIRECT_IMAGE_EXTENSIONS.test(url.pathname);
+
+        if (!isImage) {
+            const link = el('a', 'ns-link', rawUrl);
+            link.href = url.href;
+            link.target = '_blank';
+            link.rel = 'noopener noreferrer';
+            link.referrerPolicy = 'no-referrer';
+            link.title = url.href;
+            return link;
+        }
+
+        if (!forceImagePreview && !state.externalImagePreviews) {
+            return createDeferredImageNode(rawUrl, url);
+        }
+
+        return createExternalImagePreviewNode(rawUrl, url);
+    }
+
+    function refreshExternalImagePreviewNodes() {
+        if (!ui.body) return;
+
+        if (state.externalImagePreviews) {
+            for (const deferred of [...ui.body.querySelectorAll('.ns-image-deferred')]) {
+                const href = String(deferred.dataset.externalImageUrl || '');
+                const raw = String(deferred.dataset.externalImageRaw || href);
+                if (!href) continue;
+
+                try {
+                    deferred.replaceWith(
+                        createExternalImagePreviewNode(raw, new URL(href))
+                    );
+                } catch (_) {}
+            }
+            return;
+        }
+
+        for (const preview of [...ui.body.querySelectorAll('.ns-image-link[data-external-image-url]')]) {
+            const href = String(preview.dataset.externalImageUrl || preview.href || '');
+            const raw = String(preview.dataset.externalImageRaw || href);
+            if (!href) continue;
+
+            try {
+                preview.replaceWith(
+                    createDeferredImageNode(raw, new URL(href))
+                );
+            } catch (_) {}
+        }
+    }
+
+    function applyExternalImagePreviewSetting(enabled, persist = true) {
+        state.externalImagePreviews = Boolean(enabled);
+
+        if (ui.imagePreviewSelect) {
+            ui.imagePreviewSelect.value = state.externalImagePreviews ? 'on' : 'off';
+        }
+
+        if (persist) {
+            GM_setValue(IMAGE_PREVIEW_KEY, state.externalImagePreviews);
+        }
+
+        refreshExternalImagePreviewNodes();
+    }
+
+    function appendRichText(parent, value) {
+        const source = String(value || '');
+        const pattern = /:([a-z0-9][a-z0-9_-]{0,31}):|(https:\/\/[^\s<>"']+)/gi;
+        let lastIndex = 0;
+        let match;
+
+        while ((match = pattern.exec(source)) !== null) {
+            if (match.index > lastIndex) {
+                parent.appendChild(document.createTextNode(source.slice(lastIndex, match.index)));
+            }
+
+            if (match[1]) {
+                const name = match[1].toLowerCase();
+                const url = state.customEmojis.get(name);
+
+                if (url) {
+                    parent.appendChild(createCustomEmojiNode(name, url));
+                } else {
+                    parent.appendChild(document.createTextNode(match[0]));
+                }
+            } else {
+                const { urlText, trailing } = trimUrlTrailingPunctuation(match[2]);
+                const node = createHttpsLinkNode(urlText);
+
+                if (node) {
+                    parent.appendChild(node);
+                    if (trailing) parent.appendChild(document.createTextNode(trailing));
+                } else {
+                    parent.appendChild(document.createTextNode(match[0]));
+                }
+            }
+
+            lastIndex = pattern.lastIndex;
+        }
+
+        if (lastIndex < source.length) {
+            parent.appendChild(document.createTextNode(source.slice(lastIndex)));
+        }
+    }
+
+    function parseMentionTokenText(text) {
+        const fragment = document.createDocumentFragment();
+        const tokenPattern = /<@(u|f):(\d+):([A-Za-z0-9_-]{1,64})>/g;
+        let lastIndex = 0;
+        let mentionsMe = false;
+        let match;
+
+        while ((match = tokenPattern.exec(String(text || ''))) !== null) {
+            if (match.index > lastIndex) {
+                appendRichText(fragment, text.slice(lastIndex, match.index));
+            }
+
+            const type = match[1];
+            const id = Number(match[2]);
+            const fallback = match[3];
+
+            let label = fallback;
+            let targeted = false;
+
+            if (type === 'u') {
+                const user = state.mentionDirectory.users.find(entry => entry.id === id);
+                if (user?.name) label = user.name;
+                targeted = Number(state.me?.id) === id;
+            } else {
+                const faction = state.mentionDirectory.factions.find(entry => entry.id === id);
+                if (faction?.mention) label = faction.mention;
+                targeted = Number(state.me?.faction_id) === id;
+            }
+
+            if (targeted) mentionsMe = true;
+
+            const mention = el(
+                'span',
+                `ns-mention${type === 'u' ? ' ns-mention-user' : ''}${targeted ? ' ns-mention-self' : ''}`,
+                `@${label}`
+            );
+
+            mention.dataset.mentionType = type;
+            mention.dataset.mentionId = String(id);
+
+            if (type === 'u') {
+                mention.setAttribute('role', 'link');
+                mention.setAttribute('tabindex', '0');
+
+                const openMentionProfile = () => {
+                    if (!id) return;
+                    window.open(
+                        `https://www.torn.com/profiles.php?XID=${encodeURIComponent(id)}`,
+                        '_blank',
+                        'noopener,noreferrer'
+                    );
+                };
+
+                mention.addEventListener('click', openMentionProfile);
+                mention.addEventListener('keydown', event => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        openMentionProfile();
+                    }
+                });
+            }
+
+            fragment.appendChild(mention);
+            lastIndex = tokenPattern.lastIndex;
+        }
+
+        if (lastIndex < String(text || '').length) {
+            appendRichText(fragment, text.slice(lastIndex));
+        }
+
+        return { fragment, mentionsMe };
+    }
+
+    function replaceEmojiShortcodes(text) {
+        return String(text || '').replace(
+            /:([a-z0-9_+-]+):/gi,
+            (match, name) => EMOJI_SHORTCODES[name.toLowerCase()] || match
+        );
+    }
+
+    function insertTextAtCursor(textarea, text) {
+        const start = textarea.selectionStart ?? textarea.value.length;
+        const end = textarea.selectionEnd ?? textarea.value.length;
+        const before = textarea.value.slice(0, start);
+        const after = textarea.value.slice(end);
+
+        textarea.value = `${before}${text}${after}`;
+
+        const nextPos = start + text.length;
+        textarea.focus();
+        textarea.setSelectionRange(nextPos, nextPos);
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
+    function currentRole() {
+        const role = String(state.me?.role || 'member').toLowerCase();
+        return ['owner', 'admin', 'moderator'].includes(role) ? role : 'member';
+    }
+
+    function isStaffRole(role = currentRole()) {
+        return ['owner', 'admin', 'moderator'].includes(String(role || '').toLowerCase());
+    }
+
+    function canManageRoomAccess() {
+        return ['owner', 'admin'].includes(currentRole());
+    }
+
+    function targetRole(userId) {
+        if (Number(userId) === Number(state.me?.id)) return currentRole();
+        return String(state.staffRoles[String(userId)] || 'member').toLowerCase();
+    }
+
+    function canModerateTarget(userId) {
+        const actor = currentRole();
+        if (!isStaffRole(actor)) return false;
+        if (Number(userId) === Number(state.me?.id)) return true;
+        const target = targetRole(userId);
+        if (actor === 'owner') return target !== 'owner';
+        if (actor === 'admin') return target !== 'owner';
+        if (actor === 'moderator') return target !== 'owner' && target !== 'admin';
+        return false;
+    }
+
+    function refreshManageVisibility() {
+        if (!ui.manageButton) return;
+        const visible = isStaffRole();
+        ui.manageButton.classList.toggle('ns-show', visible);
+        if (!visible) ui.manage?.classList.remove('ns-show');
+        if (ui.accessSection) ui.accessSection.hidden = !canManageRoomAccess();
+        if (!canManageRoomAccess()) {
+            state.roomAccessUsers = [];
+            if (ui.accessUsers) ui.accessUsers.textContent = '';
+        }
+    }
+
+    function setManageStatus(text = '', isError = false) {
+        if (!ui.manageStatus) return;
+        ui.manageStatus.textContent = text;
+        ui.manageStatus.classList.toggle('ns-error', !!isError);
+    }
+
+    function actionLabel(action) {
+        const names = {
+            role_changed: 'changed role',
+            muted: 'muted',
+            unmuted: 'unmuted',
+            banned: 'banned',
+            unbanned: 'unbanned',
+            message_deleted: 'deleted a message from',
+            access_approved: 'approved room access for',
+            access_revoked: 'revoked room access for',
+        };
+        return names[String(action || '')] || String(action || '').replace(/_/g, ' ');
+    }
+
+    function renderModerationAudit() {
+        if (!ui.auditList) return;
+        ui.auditList.textContent = '';
+        if (!state.moderationAudit.length) {
+            ui.auditList.appendChild(el('div', 'ns-audit-entry', 'No moderation actions yet.'));
+            return;
+        }
+
+        for (const item of state.moderationAudit) {
+            const row = el('div', 'ns-audit-entry');
+            const time = el('span', 'ns-audit-time', formatTime(item.created_at));
+            const actor = String(item.actor_name || `User ${item.actor_id || '?'}`);
+            const target = String(item.target_name || (item.target_user_id ? `User ${item.target_user_id}` : ''));
+            let detail = `${actor} ${actionLabel(item.action)}`;
+            if (target) detail += ` ${target}`;
+            if (item.action === 'role_changed' && item.details?.to) {
+                detail += ` → ${item.details.to}`;
+            }
+            if (item.action === 'muted') {
+                if (item.details?.permanent) detail += ' permanently';
+                else if (item.details?.duration_minutes) detail += ` for ${item.details.duration_minutes}m`;
+            }
+            row.append(time, document.createTextNode(detail));
+            ui.auditList.appendChild(row);
+        }
+    }
+
+    async function loadModerationAudit() {
+        if (!isStaffRole()) return;
+        try {
+            const data = await api('/api/moderation/audit?limit=50');
+            state.moderationAudit = Array.isArray(data.actions) ? data.actions : [];
+            renderModerationAudit();
+        } catch (err) {
+            setManageStatus(`Could not load audit log: ${err.message}`, true);
+        }
+    }
+
+    async function runModerationAction(path, payload, successText = '') {
+        setManageStatus('Saving...');
+        try {
+            await api(path, {
+                method: 'POST',
+                body: JSON.stringify(payload || {}),
+            });
+            if (successText) setManageStatus(successText);
+            await loadModerationManage(false);
+            await loadModerationAudit();
+            schedulePoll(0);
+            return true;
+        } catch (err) {
+            setManageStatus(err.message || 'Moderation action failed', true);
+            return false;
+        }
+    }
+
+    function renderRoomAccessUsers() {
+        if (!ui.accessSection || !ui.accessUsers) return;
+        ui.accessSection.hidden = !canManageRoomAccess();
+        ui.accessUsers.textContent = '';
+        if (!canManageRoomAccess()) return;
+        ui.accessApprove.disabled = state.accessActionInFlight;
+        ui.accessInput.disabled = state.accessActionInFlight;
+
+        if (!state.roomAccessUsers.length) {
+            ui.accessUsers.appendChild(el('div', 'ns-audit-entry', 'No manually approved users.'));
+            return;
+        }
+        for (const user of state.roomAccessUsers) {
+            const userId = Number(user.user_id);
+            if (!Number.isSafeInteger(userId) || userId <= 0) continue;
+            const row = el('div', 'ns-manage-member');
+            const top = el('div', 'ns-manage-member-top');
+            const name = String(user.username || `User ${userId}`);
+            top.appendChild(el('div', 'ns-manage-member-name', `${name} [${userId}]`));
+            const faction = String(user.faction_name || '').trim() ||
+                (Number(user.faction_id) > 0 ? `Faction ${user.faction_id}` : 'Identity verified on login');
+            const sub = el('div', 'ns-manage-member-sub', faction);
+            const actions = el('div', 'ns-manage-actions');
+            const revoke = el('button', 'ns-danger', 'Revoke');
+            revoke.type = 'button';
+            revoke.disabled = state.accessActionInFlight;
+            revoke.addEventListener('click', () => {
+                if (!canManageRoomAccess()) return;
+                if (!window.confirm(`Revoke manual room access for ${name} [${userId}]? Allowed faction membership still grants access.`)) return;
+                changeRoomAccess('revoke', userId);
+            });
+            actions.appendChild(revoke);
+            row.append(top, sub, actions);
+            ui.accessUsers.appendChild(row);
+        }
+    }
+
+    async function loadRoomAccessUsers() {
+        if (!canManageRoomAccess()) {
+            state.roomAccessUsers = [];
+            renderRoomAccessUsers();
+            return;
+        }
+        const data = await api('/api/moderation/access');
+        if (data.role && state.me) state.me.role = String(data.role).toLowerCase();
+        state.roomAccessUsers = canManageRoomAccess() && Array.isArray(data.users) ? data.users : [];
+        renderRoomAccessUsers();
+        refreshManageVisibility();
+    }
+
+    async function changeRoomAccess(action, userId) {
+        if (!canManageRoomAccess() || state.accessActionInFlight) return false;
+        if (!['approve', 'revoke'].includes(action) || !Number.isSafeInteger(userId) || userId <= 0) {
+            setManageStatus('Enter a valid Torn user ID.', true);
+            return false;
+        }
+        state.accessActionInFlight = true;
+        renderRoomAccessUsers();
+        setManageStatus('Saving room access...');
+        try {
+            await api(`/api/moderation/access/${action}`, {
+                method: 'POST',
+                body: JSON.stringify({ user_id: userId }),
+            });
+            if (action === 'approve' && ui.accessInput) ui.accessInput.value = '';
+            const refreshed = await loadModerationManage(false);
+            await loadModerationAudit();
+            const message = `Room access ${action === 'approve' ? 'approved' : 'revoked'} for Torn ID ${userId}.`;
+            setManageStatus(refreshed === false ? `${message} Refresh the panel to reload the list.` : message, refreshed === false);
+            schedulePoll(0);
+            return true;
+        } catch (err) {
+            setManageStatus(err.message || 'Could not update room access', true);
+            return false;
+        } finally {
+            state.accessActionInFlight = false;
+            renderRoomAccessUsers();
+        }
+    }
+
+    function renderModerationMembers() {
+        if (!ui.manageMembers) return;
+        ui.manageMembers.textContent = '';
+        const query = String(ui.manageSearch?.value || '').trim().toLowerCase();
+        const actorRole = currentRole();
+        const members = state.moderationMembers.filter(member => {
+            if (!query) return true;
+            return `${member.name} ${member.id} ${member.faction_name} ${member.role}`.toLowerCase().includes(query);
+        });
+
+        if (!members.length) {
+            ui.manageMembers.appendChild(el('div', 'ns-audit-entry', 'No matching members.'));
+            return;
+        }
+
+        for (const member of members) {
+            const row = el('div', 'ns-manage-member');
+            const top = el('div', 'ns-manage-member-top');
+            const name = el('div', 'ns-manage-member-name', `${member.name} [${member.id}]`);
+            const role = el('span', 'ns-role-badge', member.role || 'member');
+            top.append(name, role);
+
+            if (member.banned) top.appendChild(el('span', 'ns-member-state', 'BANNED'));
+            else if (member.muted) top.appendChild(el('span', 'ns-member-state', 'MUTED'));
+
+            const sub = el('div', 'ns-manage-member-sub', member.faction_name || `Faction ${member.faction_id}`);
+            const actions = el('div', 'ns-manage-actions');
+            const isSelf = Number(member.id) === Number(state.me?.id);
+            const canTarget = !isSelf && canModerateTarget(member.id);
+
+            if (actorRole === 'owner' && member.role !== 'owner') {
+                const roleSelect = document.createElement('select');
+                for (const value of ['member', 'moderator', 'admin']) {
+                    const option = document.createElement('option');
+                    option.value = value;
+                    option.textContent = value[0].toUpperCase() + value.slice(1);
+                    roleSelect.appendChild(option);
+                }
+                roleSelect.value = ['member', 'moderator', 'admin'].includes(member.role) ? member.role : 'member';
+                const saveRole = el('button', '', 'Set role');
+                saveRole.type = 'button';
+                saveRole.addEventListener('click', () => runModerationAction(
+                    '/api/moderation/role',
+                    { target_user_id: member.id, role: roleSelect.value },
+                    `${member.name}'s role updated.`
+                ));
+                actions.append(roleSelect, saveRole);
+            }
+
+            if (canTarget) {
+                if (member.muted) {
+                    const unmute = el('button', '', 'Unmute');
+                    unmute.type = 'button';
+                    unmute.addEventListener('click', () => runModerationAction(
+                        '/api/moderation/unmute',
+                        { target_user_id: member.id, reason: '' },
+                        `${member.name} unmuted.`
+                    ));
+                    actions.appendChild(unmute);
+                } else {
+                    const duration = document.createElement('select');
+                    for (const [value, label] of [
+                        ['5', '5 min'], ['30', '30 min'], ['60', '1 hour'],
+                        ['360', '6 hours'], ['1440', '24 hours'], ['permanent', 'Permanent']
+                    ]) {
+                        const option = document.createElement('option');
+                        option.value = value;
+                        option.textContent = label;
+                        duration.appendChild(option);
+                    }
+                    duration.value = '30';
+                    const mute = el('button', '', 'Mute');
+                    mute.type = 'button';
+                    mute.addEventListener('click', () => {
+                        const durationMinutes = duration.value === 'permanent' ? null : Number(duration.value);
+                        runModerationAction(
+                            '/api/moderation/mute',
+                            { target_user_id: member.id, duration_minutes: durationMinutes, reason: '' },
+                            `${member.name} muted.`
+                        );
+                    });
+                    actions.append(duration, mute);
+                }
+
+                if (actorRole === 'owner' || actorRole === 'admin') {
+                    if (member.banned) {
+                        const unban = el('button', '', 'Unban');
+                        unban.type = 'button';
+                        unban.addEventListener('click', () => runModerationAction(
+                            '/api/moderation/unban',
+                            { target_user_id: member.id, reason: '' },
+                            `${member.name} unbanned.`
+                        ));
+                        actions.appendChild(unban);
+                    } else {
+                        const ban = el('button', 'ns-danger', 'Ban');
+                        ban.type = 'button';
+                        ban.addEventListener('click', () => {
+                            if (!confirm(`Ban ${member.name} from Naughty Souls Chat?`)) return;
+                            runModerationAction(
+                                '/api/moderation/ban',
+                                { target_user_id: member.id, reason: '' },
+                                `${member.name} banned.`
+                            );
+                        });
+                        actions.appendChild(ban);
+                    }
+                }
+            }
+
+            row.append(top, sub);
+            if (actions.childNodes.length) row.appendChild(actions);
+            ui.manageMembers.appendChild(row);
+        }
+    }
+
+    async function loadModerationManage(loadAudit = true) {
+        if (!isStaffRole()) return;
+        setManageStatus('Loading...');
+        try {
+            const data = await api('/api/moderation/manage');
+            if (data.role && state.me) state.me.role = String(data.role).toLowerCase();
+            state.moderationMembers = Array.isArray(data.members) ? data.members : [];
+            state.staffRoles = {};
+            for (const member of state.moderationMembers) {
+                if (['owner', 'admin', 'moderator'].includes(String(member.role || '').toLowerCase())) {
+                    state.staffRoles[String(member.id)] = String(member.role).toLowerCase();
+                }
+            }
+            refreshManageVisibility();
+            if (ui.manageRole) ui.manageRole.textContent = currentRole();
+            renderModerationMembers();
+            setManageStatus(`${state.moderationMembers.length} members`);
+            await loadRoomAccessUsers();
+            if (loadAudit) await loadModerationAudit();
+            return true;
+        } catch (err) {
+            setManageStatus(err.message || 'Could not load moderation data', true);
+            return false;
+        }
+    }
+
+    async function openManagePanel() {
+        if (!isStaffRole() || !ui.manage) return;
+        ui.settings?.classList.remove('ns-show');
+        ui.emojiPicker?.classList.remove('ns-show');
+        closeMentionMenu();
+        ui.manage.classList.add('ns-show');
+        await loadModerationManage(true);
+        ui.manageSearch?.focus();
+    }
+
+    function markMessageDeleted(messageId) {
+        const id = String(messageId || '');
+        if (!id) return;
+        state.deletedMessageIds.add(id);
+        if (state.deletedMessageIds.size > 1000) {
+            const first = state.deletedMessageIds.values().next().value;
+            if (first) state.deletedMessageIds.delete(first);
+        }
+        for (const node of ui.body?.querySelectorAll('.ns-msg') || []) {
+            if (String(node.dataset.messageId || '') !== id) continue;
+            node.classList.add('ns-deleted');
+            const body = node.querySelector('.ns-text');
+            if (body) body.replaceChildren(el('span', 'ns-deleted-text', '[message removed by moderator]'));
+            node.querySelectorAll('.ns-mod-delete, .ns-reply-button').forEach(button => button.remove());
+        }
+
+        for (const ref of ui.body?.querySelectorAll('.ns-reply-ref') || []) {
+            if (String(ref.dataset.replyToMessageId || '') !== id) continue;
+            ref.classList.add('ns-reply-missing');
+            ref.disabled = true;
+            ref.replaceChildren(document.createTextNode('Replying to deleted message'));
+        }
+
+        if (String(state.replyingTo?.messageId || '') === id) {
+            clearReplyTarget();
+        }
+    }
+
+    async function deleteMessageAsModerator(msg) {
+        if (!isStaffRole() || !msg?.message_id) return;
+        if (!confirm(`Delete this message from ${msg.sender_name || 'this user'}?`)) return;
+        try {
+            await api(`/api/moderation/messages/${encodeURIComponent(msg.message_id)}/delete`, {
+                method: 'POST',
+                body: '{}',
+            });
+            markMessageDeleted(msg.message_id);
+            schedulePoll(0);
+            if (ui.manage?.classList.contains('ns-show')) {
+                await loadModerationAudit();
+            }
+        } catch (err) {
+            addSystem(`Could not delete message: ${err.message}`, true);
+        }
+    }
+
+    function encodeMessageEnvelope(text, reply = null) {
+        if (!reply?.messageId) return text;
+
+        return MESSAGE_ENVELOPE_PREFIX + JSON.stringify({
+            v: 1,
+            text,
+            reply: {
+                message_id: String(reply.messageId),
+                seq: Math.max(0, Number(reply.seq || 0)),
+                author: String(reply.author || 'Unknown user').slice(0, 64),
+            },
+        });
+    }
+
+    function decodeMessageEnvelope(value) {
+        const raw = String(value || '');
+        if (!raw.startsWith(MESSAGE_ENVELOPE_PREFIX)) {
+            return { text: raw, reply: null };
+        }
+
+        try {
+            const parsed = JSON.parse(raw.slice(MESSAGE_ENVELOPE_PREFIX.length));
+            if (Number(parsed?.v) !== 1 || typeof parsed?.text !== 'string') {
+                return { text: raw, reply: null };
+            }
+
+            const reply = parsed?.reply;
+            const normalizedReply =
+                reply && String(reply.message_id || '')
+                    ? {
+                        messageId: String(reply.message_id),
+                        seq: Math.max(0, Number(reply.seq || 0)),
+                        author: String(reply.author || 'Unknown user').slice(0, 64),
+                    }
+                    : null;
+
+            return {
+                text: parsed.text,
+                reply: normalizedReply,
+            };
+        } catch (_) {
+            // Treat malformed/unknown envelopes as ordinary plaintext instead of
+            // losing the message.
+            return { text: raw, reply: null };
+        }
+    }
+
+    function findRenderedMessage(messageId) {
+        const wanted = String(messageId || '');
+        if (!wanted || !ui.body) return null;
+
+        for (const node of ui.body.querySelectorAll('.ns-msg')) {
+            if (String(node.dataset.messageId || '') === wanted) return node;
+        }
+        return null;
+    }
+
+    function updateReplyComposer() {
+        const target = state.replyingTo;
+        if (!ui.replyCompose || !ui.replyComposeTarget) return;
+
+        ui.panel?.classList.toggle('ns-has-reply', Boolean(target));
+
+        if (!target) {
+            ui.replyCompose.classList.remove('ns-show');
+            ui.replyComposeTarget.replaceChildren();
+            return;
+        }
+
+        ui.replyComposeTarget.replaceChildren(
+            document.createTextNode('Replying to '),
+            el('strong', '', target.author || 'Unknown user')
+        );
+        ui.replyCompose.classList.add('ns-show');
+    }
+
+    function clearReplyTarget() {
+        state.replyingTo = null;
+        updateReplyComposer();
+    }
+
+    function setReplyTarget(msg) {
+        if (!msg?.message_id) return;
+
+        state.replyingTo = {
+            messageId: String(msg.message_id),
+            seq: Math.max(0, Number(msg.seq || 0)),
+            author: String(msg.sender_name || 'Unknown user').slice(0, 64),
+        };
+
+        updateReplyComposer();
+        ui.textarea?.focus();
+    }
+
+    async function jumpToMessage(messageId, targetSeq = 0) {
+        const wanted = String(messageId || '');
+        if (!wanted) return;
+
+        let node = findRenderedMessage(wanted);
+        let pages = 0;
+        const seq = Math.max(0, Number(targetSeq || 0));
+
+        // Keep history contiguous while looking backwards. Regular scrolling still
+        // stops at HISTORY_MAX_LOADED; an explicit reply jump may go further.
+        while (
+            !node &&
+            seq > 0 &&
+            state.oldestHistorySeq > 0 &&
+            seq < state.oldestHistorySeq &&
+            !state.historyServerExhausted &&
+            pages < REPLY_JUMP_MAX_PAGES
+        ) {
+            const loaded = await loadOlderHistory(true);
+            pages += 1;
+            if (!loaded) break;
+            node = findRenderedMessage(wanted);
+        }
+
+        node = node || findRenderedMessage(wanted);
+
+        if (!node) {
+            addSystem('Original reply message is outside the available loaded history.');
+            return;
+        }
+
+        node.scrollIntoView({
+            behavior: 'smooth',
+            block: 'center',
+        });
+
+        // Restart the one-second highlight even if the same reply is clicked twice.
+        node.classList.remove('ns-reply-target-highlight');
+        void node.offsetWidth;
+        node.classList.add('ns-reply-target-highlight');
+
+        setTimeout(() => {
+            node.classList.remove('ns-reply-target-highlight');
+        }, 1000);
+    }
+
+    function buildReplyReference(reply) {
+        if (!reply?.messageId) return null;
+
+        const deleted = state.deletedMessageIds.has(String(reply.messageId));
+        const ref = el(
+            'button',
+            `ns-reply-ref${deleted ? ' ns-reply-missing' : ''}`
+        );
+        ref.type = 'button';
+        ref.dataset.replyToMessageId = String(reply.messageId);
+        ref.dataset.replyToSeq = String(reply.seq || 0);
+
+        if (deleted) {
+            ref.textContent = 'Replying to deleted message';
+            ref.disabled = true;
+            return ref;
+        }
+
+        ref.append(
+            document.createTextNode('Replying to '),
+            el('span', 'ns-reply-author', reply.author || 'Unknown user')
+        );
+        ref.title = 'Jump to replied-to message';
+
+        ref.addEventListener('click', () => {
+            jumpToMessage(reply.messageId, reply.seq);
+        });
+
+        return ref;
+    }
+
+    function buildPanel() {
+        if (document.getElementById(PANEL_ID)) return;
+        const panel = el('div');
+        panel.id = PANEL_ID;
+
+        const header = el('div', 'ns-header');
+        const title = el('div', 'ns-title', state.roomName);
+        const online = el('div', 'ns-online', 'offline');
+        const manageButton = el('button', 'ns-manage-button', 'Manage');
+        manageButton.type = 'button'; manageButton.title = 'Moderation';
+        const settingsButton = el('button', '', '⚙');
+        settingsButton.type = 'button'; settingsButton.title = 'Settings';
+        const mobileSizeButton = el('button', 'ns-mobile-size', '⛶');
+        mobileSizeButton.type = 'button'; mobileSizeButton.title = 'Expand chat';
+        const min = el('button', '', '—');
+        min.type = 'button'; min.title = 'Hide';
+        const close = el('button', '', '×');
+        close.type = 'button'; close.title = 'Close';
+        header.append(title, online, manageButton, settingsButton, mobileSizeButton, min, close);
+
+        const status = el('div', 'ns-status', 'Not connected');
+        const body = el('div', 'ns-body');
+        const newMessages = el('button', 'ns-new-messages', 'New messages ↓');
+        newMessages.type = 'button';
+
+        const settings = el('div', 'ns-settings');
+        const settingsTitle = el('div', 'ns-settings-title', 'Chat settings');
+        const themeLabel = el('div', 'ns-settings-label', 'Theme');
+        const themeSelect = document.createElement('select');
+        themeSelect.className = 'ns-theme-select';
+
+        for (const [value, label] of [
+            ['default', 'Default'],
+            ['almanac', 'Almanac'],
+            ['flux', 'NS']
+        ]) {
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = label;
+            themeSelect.appendChild(option);
+        }
+
+        themeSelect.value = state.theme;
+
+        const imagePreviewLabel = el(
+            'div',
+            'ns-settings-label ns-settings-label-spaced',
+            'External image previews'
+        );
+        const imagePreviewSelect = document.createElement('select');
+        imagePreviewSelect.className = 'ns-image-preview-select';
+
+        for (const [value, label] of [
+            ['on', 'On'],
+            ['off', 'Off']
+        ]) {
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = label;
+            imagePreviewSelect.appendChild(option);
+        }
+
+        imagePreviewSelect.value = state.externalImagePreviews ? 'on' : 'off';
+
+        const signOutButton = el('button', 'ns-signout', 'Sign out');
+        signOutButton.type = 'button';
+        signOutButton.title = 'Sign out of Naughty Souls Chat on this browser';
+
+        settings.append(
+            settingsTitle,
+            themeLabel,
+            themeSelect,
+            imagePreviewLabel,
+            imagePreviewSelect,
+            signOutButton
+        );
+
+        const composer = el('div', 'ns-composer');
+
+        const replyCompose = el('div', 'ns-reply-compose');
+        const replyComposeTarget = el('button', 'ns-reply-compose-target');
+        replyComposeTarget.type = 'button';
+        replyComposeTarget.title = 'Jump to replied-to message';
+        const replyCancel = el('button', 'ns-reply-cancel', '×');
+        replyCancel.type = 'button';
+        replyCancel.title = 'Cancel reply';
+        replyCompose.append(replyComposeTarget, replyCancel);
+
+        const textarea = document.createElement('textarea');
+        textarea.placeholder = 'Type your message here...';
+        textarea.maxLength = state.maxMessageChars;
+
+        const emojiButton = el('button', 'ns-emoji-button', '☺');
+        emojiButton.type = 'button';
+        emojiButton.title = 'Emoji';
+
+        const send = el('button', 'ns-send', 'Send');
+        send.type = 'button'; send.disabled = true;
+
+        composer.append(replyCompose, textarea, emojiButton, send);
+
+        const mentionMenu = el('div', 'ns-mention-menu');
+
+        const emojiPicker = el('div', 'ns-emoji-picker');
+        for (const emoji of EMOJI_PICKER_ITEMS) {
+            const item = el('button', 'ns-emoji-item', emoji);
+            item.type = 'button';
+            item.title = emoji;
+            item.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                insertTextAtCursor(textarea, emoji);
+                emojiPicker.classList.remove('ns-show');
+            });
+            emojiPicker.appendChild(item);
+        }
+
+        const manage = el('div', 'ns-manage');
+        const manageHead = el('div', 'ns-manage-head');
+        const manageTitle = el('div', 'ns-manage-title', 'Manage');
+        const manageRole = el('div', 'ns-manage-role', currentRole());
+        const manageRefresh = el('button', 'ns-manage-refresh', 'Refresh');
+        manageRefresh.type = 'button';
+        const manageClose = el('button', 'ns-manage-close', '×');
+        manageClose.type = 'button';
+        manageClose.title = 'Close manage';
+        manageHead.append(manageTitle, manageRole, manageRefresh, manageClose);
+
+        const manageControls = el('div', 'ns-manage-controls');
+        const manageSearch = document.createElement('input');
+        manageSearch.className = 'ns-manage-search';
+        manageSearch.type = 'search';
+        manageSearch.placeholder = 'Search members...';
+        manageControls.appendChild(manageSearch);
+
+        const manageStatus = el('div', 'ns-manage-status');
+        const manageScroll = el('div', 'ns-manage-scroll');
+        const accessSection = el('section', 'ns-access-section');
+        accessSection.hidden = true;
+        const accessTitle = el('div', 'ns-manage-section-title', 'Approved Users');
+        const accessForm = el('form', 'ns-manage-controls');
+        const accessInput = document.createElement('input');
+        accessInput.className = 'ns-manage-search';
+        accessInput.type = 'text';
+        accessInput.inputMode = 'numeric';
+        accessInput.autocomplete = 'off';
+        accessInput.placeholder = 'Torn ID';
+        accessInput.setAttribute('aria-label', 'Torn user ID to approve');
+        const accessApprove = el('button', 'ns-manage-refresh', 'Approve');
+        accessApprove.type = 'submit';
+        accessForm.append(accessInput, accessApprove);
+        const accessUsers = el('div', 'ns-access-users');
+        accessSection.append(accessTitle, accessForm, accessUsers);
+        const membersTitle = el('div', 'ns-manage-section-title', 'Members');
+        const manageMembers = el('div', 'ns-manage-members');
+        const auditTitle = el('div', 'ns-manage-section-title', 'Audit log');
+        const auditList = el('div', 'ns-audit-list');
+        manageScroll.append(accessSection, membersTitle, manageMembers, auditTitle, auditList);
+        manage.append(manageHead, manageControls, manageStatus, manageScroll);
+
+        const login = el('div', 'ns-login');
+        const loginTitle = el('h3', '', 'Naughty Souls Chat authentication');
+        const loginInfo = el(
+            'p',
+            '',
+            'Create a dedicated Public Access API key for Naughty Souls Chat, then paste it below.'
+        );
+
+        const actions = el('div', 'ns-login-actions');
+
+        const createKeyButton = el('button', '', 'Create Public API key on Torn');
+        createKeyButton.type = 'button';
+
+        const inputLabel = el('div', 'ns-login-label', 'Paste your API key:');
+        const input = document.createElement('input');
+        input.type = 'password';
+        input.id = 'naughty-souls-chat-api-key';
+        input.name = 'naughty-souls-chat-api-key';
+        input.placeholder = 'Paste Torn API key';
+        input.autocomplete = 'off';
+        input.setAttribute('data-lpignore', 'true');
+        input.setAttribute('data-1p-ignore', 'true');
+        input.setAttribute('data-bwignore', 'true');
+        input.setAttribute('autocorrect', 'off');
+        input.setAttribute('autocapitalize', 'none');
+        input.spellcheck = false;
+
+        const loginButton = el('button', '', 'Verify and connect');
+        loginButton.type = 'button';
+
+        actions.append(createKeyButton, inputLabel, input, loginButton);
+
+        const shortNote = el(
+            'p',
+            'ns-login-note',
+            'Your key is used once to verify your Torn account and current faction. The API key is not stored. This device stays signed in for up to 90 days using a rotating session token.'
+        );
+
+        const privacy = document.createElement('details');
+        privacy.className = 'ns-privacy';
+
+        const privacySummary = document.createElement('summary');
+        privacySummary.textContent = 'Privacy & API usage';
+
+        const privacyBody = el('div', 'ns-privacy-body');
+
+        const privacyKey = el(
+            'p',
+            '',
+            'API key: used for one Torn API v2 key/info request at login. It is not stored by Naughty Souls Chat.'
+        );
+        const privacyData = el(
+            'p',
+            '',
+            'Stored account data: Torn user ID, username, and faction ID.'
+        );
+        const privacyDom = el(
+            'p',
+            '',
+            'Userscript behavior: does not read or transmit Torn faction-chat messages or other Torn page content. Torn DOM access is only used to position this custom UI.'
+        );
+        const privacyMembership = el(
+            'p',
+            '',
+            'Membership checks: performed through Torn\'s official API by the chat server.'
+        );
+
+        privacyBody.append(privacyKey, privacyData, privacyDom, privacyMembership);
+        privacy.append(privacySummary, privacyBody);
+
+        const loginError = el('div', 'ns-login-error');
+
+        login.append(loginTitle, loginInfo, actions, shortNote, privacy, loginError);
+
+        // Keep the login/password subtree detached during normal authenticated use.
+        // Password managers can otherwise see a hidden password input and incorrectly
+        // pair it with an unrelated text/search field from Torn or another userscript.
+        panel.append(header, status, body, newMessages, composer, mentionMenu, emojiPicker, settings, manage);
+        document.body.appendChild(panel);
+        ui = { panel, header, title, online, manageButton, settingsButton, mobileSizeButton, min, close, status, body, newMessages, composer, replyCompose, replyComposeTarget, replyCancel, textarea, mentionMenu, emojiButton, emojiPicker, send, login, input, loginButton, loginError, settings, themeSelect, imagePreviewSelect, signOutButton, manage, manageRole, manageRefresh, manageClose, manageSearch, manageStatus, manageMembers, auditList, accessSection, accessInput, accessApprove, accessUsers };
+        refreshManageVisibility();
+
+        applyTheme(state.theme, false);
+
+        const savedUi = loadUiState();
+
+        if (isMobileLayout()) {
+            panel.classList.toggle('ns-mobile-expanded', savedUi.mobileExpanded);
+            mobileSizeButton.textContent = savedUi.mobileExpanded ? '▣' : '⛶';
+            mobileSizeButton.title = savedUi.mobileExpanded ? 'Compact chat' : 'Expand chat';
+        } else {
+            restoreDesktopGeometry();
+        }
+
+        if (savedUi.minimized) panel.classList.add('ns-minimized');
+        if (savedUi.visible) panel.classList.add('ns-visible');
+
+        mobileSizeButton.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (!isMobileLayout()) return;
+            panel.classList.toggle('ns-mobile-expanded');
+            const expanded = panel.classList.contains('ns-mobile-expanded');
+            mobileSizeButton.textContent = expanded ? '▣' : '⛶';
+            mobileSizeButton.title = expanded ? 'Compact chat' : 'Expand chat';
+
+            if (!expanded) {
+                const viewportHeight = window.visualViewport?.height || window.innerHeight;
+                mobileCompactHeight = Math.max(240, Math.min(viewportHeight * 0.65, 520));
+                panel.dataset.mobileHeightInitialized = '1';
+            }
+
+            saveUiState({ mobileExpanded: expanded });
+            updateMobileViewport(true);
+        });
+
+        let updateOpenAt = 0;
+        const triggerUpdateOpen = (e) => {
+            if (!state.updateAvailable) return;
+            e.preventDefault();
+            e.stopPropagation();
+
+            const now = Date.now();
+            if (now - updateOpenAt < 700) return;
+            updateOpenAt = now;
+
+            openUserscriptUpdate();
+        };
+
+        online.addEventListener('click', triggerUpdateOpen);
+        online.addEventListener('pointerup', triggerUpdateOpen);
+
+        manageButton.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            openManagePanel();
+        });
+
+        manageClose.addEventListener('click', () => {
+            manage.classList.remove('ns-show');
+        });
+
+        manageRefresh.addEventListener('click', () => {
+            loadModerationManage(true);
+        });
+
+        manageSearch.addEventListener('input', renderModerationMembers);
+
+        accessForm.addEventListener('submit', (event) => {
+            event.preventDefault();
+            if (!canManageRoomAccess()) return;
+            const value = accessInput.value.trim();
+            if (!/^[1-9]\d*$/.test(value)) {
+                setManageStatus('Enter a valid Torn user ID.', true);
+                return;
+            }
+            changeRoomAccess('approve', Number(value));
+        });
+
+        settingsButton.addEventListener('click', (e) => {
+            e.stopPropagation();
+            settings.classList.toggle('ns-show');
+        });
+
+        themeSelect.addEventListener('change', () => {
+            applyTheme(themeSelect.value, true);
+        });
+
+        imagePreviewSelect.addEventListener('change', () => {
+            applyExternalImagePreviewSetting(
+                imagePreviewSelect.value === 'on',
+                true
+            );
+        });
+
+        signOutButton.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            signOutExplicitly();
+        });
+
+        min.addEventListener('click', (e) => {
+            e.stopPropagation();
+            saveCurrentPanelGeometry();
+            panel.classList.remove('ns-visible');
+            settings.classList.remove('ns-show');
+            manage.classList.remove('ns-show');
+            panel.classList.remove('ns-minimized');
+            saveUiState({ visible: false, minimized: false });
+            schedulePoll(POLL_CLOSED_MS);
+        });
+        close.addEventListener('click', (e) => {
+            e.stopPropagation();
+            saveCurrentPanelGeometry();
+            panel.classList.remove('ns-visible');
+            settings.classList.remove('ns-show');
+            manage.classList.remove('ns-show');
+            if (login.classList.contains('ns-show')) unmountLoginPanel();
+            saveUiState({ visible: false });
+            schedulePoll(POLL_CLOSED_MS);
+        });
+        emojiButton.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            closeMentionMenu();
+            emojiPicker.classList.toggle('ns-show');
+        });
+
+        document.addEventListener('click', (e) => {
+            if (
+                emojiPicker.classList.contains('ns-show') &&
+                !emojiPicker.contains(e.target) &&
+                e.target !== emojiButton
+            ) {
+                emojiPicker.classList.remove('ns-show');
+            }
+
+            if (
+                mentionMenu.classList.contains('ns-show') &&
+                !mentionMenu.contains(e.target) &&
+                e.target !== textarea
+            ) {
+                closeMentionMenu();
+            }
+        });
+
+        newMessages.addEventListener('click', () => {
+            scrollBottom();
+            clearSharedUnread(state.lastCursor);
+        });
+
+        replyComposeTarget.addEventListener('click', () => {
+            if (!state.replyingTo) return;
+            jumpToMessage(state.replyingTo.messageId, state.replyingTo.seq);
+        });
+
+        replyCancel.addEventListener('click', () => {
+            clearReplyTarget();
+            textarea.focus();
+        });
+
+        send.addEventListener('click', sendMessage);
+
+        textarea.addEventListener('input', () => {
+            renderMentionMenu();
+        });
+
+        textarea.addEventListener('click', () => {
+            renderMentionMenu();
+        });
+
+        textarea.addEventListener('keydown', (e) => {
+            const mentionOpen =
+                ui.mentionMenu?.classList.contains('ns-show') &&
+                state.mentionSuggestions.length > 0;
+
+            if (mentionOpen && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+                e.preventDefault();
+                const delta = e.key === 'ArrowDown' ? 1 : -1;
+                const length = state.mentionSuggestions.length;
+                state.mentionSelection = (state.mentionSelection + delta + length) % length;
+                renderMentionMenu();
+                return;
+            }
+
+            if (mentionOpen && (e.key === 'Enter' || e.key === 'Tab')) {
+                e.preventDefault();
+                insertMentionSuggestion(
+                    state.mentionSuggestions[state.mentionSelection] ||
+                    state.mentionSuggestions[0]
+                );
+                return;
+            }
+
+            if (mentionOpen && e.key === 'Escape') {
+                e.preventDefault();
+                closeMentionMenu();
+                return;
+            }
+
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+
+        body.addEventListener('scroll', () => {
+            if (body.scrollTop <= 12) {
+                loadOlderHistory();
+            }
+
+            if (
+                (state.unread > 0 || state.lastReadSeq < state.lastCursor) &&
+                isNearBottom() &&
+                isPageActive() &&
+                panel.classList.contains('ns-visible') &&
+                !panel.classList.contains('ns-minimized')
+            ) {
+                newMessages.classList.remove('ns-show');
+                clearSharedUnread(state.lastCursor);
+            }
+        }, { passive: true });
+        loginButton.addEventListener('click', loginWithKey);
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') loginWithKey();
+        });
+
+        createKeyButton.addEventListener('click', () => {
+            const url = 'https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=Naughty%20Souls%20Shared%20Chat&type=1';
+            window.open(url, '_blank', 'noopener,noreferrer');
+        });
+        makeDraggable(panel, header);
+
+        installDesktopResizePersistence(panel);
+
+        updateMobileViewport();
+    }
+
+    function isElementVisible(element) {
+        if (!element || !element.isConnected) return false;
+
+        const rect = element.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return false;
+
+        const style = window.getComputedStyle(element);
+        return style.display !== 'none' && style.visibility !== 'hidden';
+    }
+
+    function removeLauncherNode(launcher = document.getElementById(LAUNCHER_ID)) {
+        if (!launcher) return;
+
+        const wrapper = launcher.parentElement;
+        if (wrapper?.dataset?.naughtySoulsWrapper === '1') {
+            wrapper.remove();
+        } else {
+            launcher.remove();
+        }
+    }
+
+    function mobileContainerHasLauncherRoom(controlsContainer) {
+        if (!isMobileLayout()) return true;
+        if (!isElementVisible(controlsContainer)) return false;
+
+        const style = window.getComputedStyle(controlsContainer);
+
+        // Torn's grouped/expanded chat UI may stack or wrap entries. In that
+        // layout an extra launcher does not steal horizontal space from the
+        // compact launcher strip, so it is safe to attach NS there.
+        if (style.flexDirection === 'column' || style.flexWrap !== 'nowrap') {
+            return true;
+        }
+
+        const containerRect = controlsContainer.getBoundingClientRect();
+        const gap = Number.parseFloat(style.columnGap || style.gap || '0') || 0;
+        const children = [...controlsContainer.children].filter(child => {
+            if (!(child instanceof HTMLElement)) return false;
+            if (child.dataset?.naughtySoulsWrapper === '1') return false;
+            if (!isElementVisible(child)) return false;
+            return true;
+        });
+
+        const usedWidth = children.reduce(
+            (total, child) => total + child.getBoundingClientRect().width,
+            0
+        );
+        const gapsWidth = Math.max(0, children.length - 1) * gap;
+
+        // Our Torn-style wrapper/button occupies roughly one 40px launcher slot.
+        // Keep a small tolerance for borders/subpixel rounding.
+        return usedWidth + gapsWidth + 42 <= containerRect.width + 2;
+    }
+
+    function installLauncher() {
+        // Torn Chat 2.0/3.0 used channel_panel_button:faction-* while
+        // Chat 3.1 uses chat_panel_button:faction. Support both without
+        // depending on Torn's build-hashed CSS class names.
+        const factionButton = document.querySelector(
+            '[id^="channel_panel_button:faction-"], [id^="chat_panel_button:faction"]'
+        );
+
+        let launcher = document.getElementById(LAUNCHER_ID);
+
+        // Mobile Chat 3.1 can collapse chat launchers into a grouped menu.
+        // When the faction anchor is absent/hidden, do not recreate NS as a
+        // detached floating button. It should disappear with Torn's group and
+        // reappear when that grouped UI is opened again.
+        if (!factionButton || !isElementVisible(factionButton)) {
+            if (isMobileLayout()) removeLauncherNode(launcher);
+            return;
+        }
+
+        const factionWrapper = factionButton.parentElement;
+        const controlsContainer = factionWrapper?.parentElement;
+
+        if (!factionWrapper || !controlsContainer) {
+            if (isMobileLayout()) removeLauncherNode(launcher);
+            return;
+        }
+
+        // In Torn's compact phone strip there may be no room for another icon.
+        // In that state NS must remain hidden instead of overflowing/floating
+        // off the right edge. Opening Torn's grouped-chat UI gives us a suitable
+        // container and the observer/click hook will install it there.
+        if (!mobileContainerHasLauncherRoom(controlsContainer)) {
+            removeLauncherNode(launcher);
+            return;
+        }
+
+        launcher = document.getElementById(LAUNCHER_ID);
+
+        // Already installed correctly in its own Torn-style wrapper.
+        if (
+            launcher &&
+            launcher.parentElement?.dataset?.naughtySoulsWrapper === '1' &&
+            launcher.parentElement?.parentElement === controlsContainer
+        ) {
+            launcher.classList.remove('ns-launcher-floating');
+            launcher.parentElement.classList.remove('ns-launcher-floating');
+            updateBadge();
+            return;
+        }
+
+        // Remove any previous/bad installation before moving to Torn's current
+        // launcher/group container.
+        removeLauncherNode(launcher);
+
+        // Create a new sibling wrapper using Torn's own wrapper shell.
+        const wrapper = factionWrapper.cloneNode(false);
+        wrapper.removeAttribute('data-naughty-souls-launcher-host');
+        wrapper.dataset.naughtySoulsWrapper = '1';
+
+        // Keep Torn's layout slot, but make our own click surface sit above its DnD layers.
+        wrapper.style.transition = factionWrapper.style.transition || 'transform linear';
+        wrapper.style.position = 'relative';
+        wrapper.style.zIndex = '2147483646';
+        wrapper.style.pointerEvents = 'auto';
+        wrapper.classList.remove('ns-launcher-floating');
+
+        const button = el('button');
+        button.id = LAUNCHER_ID;
+        button.type = 'button';
+        button.title = 'Naughty Souls Chat';
+        button.classList.remove('ns-launcher-floating');
+
+        // Absolute positioning keeps the Torn flex slot intact while ensuring the
+        // clickable surface is above Torn's drag/drop overlays.
+        const factionRect = factionWrapper.getBoundingClientRect();
+        const slotWidth = Math.max(40, factionRect.width || 40);
+        const slotHeight = Math.max(40, factionRect.height || 40);
+        wrapper.style.width = `${slotWidth}px`;
+        wrapper.style.minWidth = `${slotWidth}px`;
+        wrapper.style.height = `${slotHeight}px`;
+
+        button.style.position = 'absolute';
+        button.style.width = '40px';
+        button.style.height = '40px';
+        button.style.left = '50%';
+        button.style.top = '50%';
+        button.style.transform = 'translate(-50%, -50%)';
+        button.style.zIndex = '2147483647';
+        button.style.pointerEvents = 'auto';
+        button.style.touchAction = 'manipulation';
+
+        button.append(document.createTextNode('NS'));
+
+        const badge = el('span', 'ns-badge', '0');
+        button.appendChild(badge);
+
+        const swallowTornPointer = (event) => {
+            event.stopPropagation();
+        };
+
+        button.addEventListener('pointerdown', swallowTornPointer, true);
+        button.addEventListener('mousedown', swallowTornPointer, true);
+
+        button.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+
+            console.log('[NaughtySoulsChat] Launcher clicked');
+
+            buildPanel();
+
+            const isVisible = ui.panel.classList.contains('ns-visible');
+
+            if (isVisible) {
+                saveCurrentPanelGeometry();
+                ui.panel.classList.remove('ns-visible');
+                ui.settings?.classList.remove('ns-show');
+                if (ui.login?.classList.contains('ns-show')) unmountLoginPanel();
+                saveUiState({ visible: false });
+                schedulePoll(POLL_CLOSED_MS);
+                return;
+            }
+
+            ui.panel.classList.add('ns-visible');
+            ui.panel.classList.remove('ns-minimized');
+            saveUiState({ visible: true, minimized: false });
+            if (isMobileLayout()) updateMobileViewport();
+
+            clearSharedUnread();
+
+            positionPanelNearTornChat();
+            checkForUserscriptUpdate();
+            startIfNeeded();
+        });
+
+        wrapper.appendChild(button);
+
+        // Insert NS as its own Torn-style item immediately before Faction.
+        // On mobile this only happens when Torn's current container has space
+        // (normally the grouped-chat menu), never as a floating fallback.
+        controlsContainer.insertBefore(wrapper, factionWrapper);
+
+        updateBadge();
+    }
+
+    function positionPanelNearTornChat() {
+        if (!ui.panel || ui.panel.dataset.dragged === '1') return;
+
+        const saved = loadDesktopGeometry();
+        if (saved) {
+            restoreDesktopGeometry(saved);
+            return;
+        }
+        const tornWindow = document.querySelector(
+            '#chatRoot #faction, #chatRoot [id^="faction-"]'
+        );
+        if (tornWindow) {
+            const r = tornWindow.getBoundingClientRect();
+            const left = Math.max(8, r.left - 308);
+            const bottom = Math.max(0, window.innerHeight - r.bottom);
+
+            ui.panel.style.left = `${left}px`;
+            ui.panel.style.right = 'auto';
+            ui.panel.style.bottom = `${bottom}px`;
+
+            // Convert the auto-placement into a stable top/left geometry and save it,
+            // so reopening the browser does not treat it as a fresh default position.
+            requestAnimationFrame(() => {
+                if (!ui.panel?.classList.contains('ns-visible') || isMobileLayout()) return;
+                const rect = ui.panel.getBoundingClientRect();
+                ui.panel.style.left = `${Math.round(rect.left)}px`;
+                ui.panel.style.top = `${Math.round(rect.top)}px`;
+                ui.panel.style.right = 'auto';
+                ui.panel.style.bottom = 'auto';
+                ui.panel.dataset.dragged = '1';
+                saveCurrentPanelGeometry();
+            });
+        }
+    }
+
+    function isMobileLayout() {
+        return window.matchMedia(MOBILE_MEDIA).matches;
+    }
+
+    function updateMobileViewport(force = false) {
+        if (!ui.panel) return;
+
+        const panel = ui.panel;
+
+        if (!isMobileLayout()) {
+            panel.classList.remove('ns-mobile-expanded');
+            mobileCompactHeight = null;
+            mobileKeyboardWasOpen = false;
+
+            restoreDesktopGeometry();
+
+            if (ui.mobileSizeButton) {
+                ui.mobileSizeButton.textContent = '⛶';
+                ui.mobileSizeButton.title = 'Expand chat';
+            }
+            return;
+        }
+
+        const viewport = window.visualViewport;
+        const viewportWidth = viewport?.width || window.innerWidth;
+        const viewportHeight = viewport?.height || window.innerHeight;
+        const offsetLeft = viewport?.offsetLeft || 0;
+        const offsetTop = viewport?.offsetTop || 0;
+        const expanded = panel.classList.contains('ns-mobile-expanded');
+
+        const keyboardLikelyOpen =
+            !!viewport && viewportHeight < window.innerHeight * 0.82;
+
+        // Capture compact height only while the keyboard is closed.
+        // Once captured, keep reusing it so browser chrome / visualViewport
+        // changes don't make the chat grow a few pixels after typing.
+        if (!expanded && !keyboardLikelyOpen) {
+            if (mobileCompactHeight === null || mobileKeyboardWasOpen === false && force === false && panel.dataset.mobileHeightInitialized !== '1') {
+                mobileCompactHeight = Math.max(
+                    240,
+                    Math.min(viewportHeight * 0.65, 520)
+                );
+                panel.dataset.mobileHeightInitialized = '1';
+            }
+        }
+
+        let targetHeight;
+
+        if (expanded) {
+            targetHeight = Math.max(240, viewportHeight - 12);
+        } else if (keyboardLikelyOpen) {
+            targetHeight = Math.max(240, viewportHeight - 12);
+        } else {
+            if (mobileCompactHeight === null) {
+                mobileCompactHeight = Math.max(
+                    240,
+                    Math.min(viewportHeight * 0.65, 520)
+                );
+            }
+            targetHeight = mobileCompactHeight;
+        }
+
+        mobileKeyboardWasOpen = keyboardLikelyOpen;
+
+        const targetWidth = Math.max(248, viewportWidth - 12);
+        const left = offsetLeft + 6;
+        const top = offsetTop + Math.max(6, viewportHeight - targetHeight - 6);
+
+        panel.style.width = `${targetWidth}px`;
+        panel.style.height = `${targetHeight}px`;
+        panel.style.left = `${left}px`;
+        panel.style.top = `${top}px`;
+        panel.style.right = 'auto';
+        panel.style.bottom = 'auto';
+
+        if (force && ui.body) {
+            requestAnimationFrame(() => {
+                if (document.activeElement === ui.textarea) {
+                    ui.body.scrollTop = ui.body.scrollHeight;
+                }
+            });
+        }
+    }
+
+    function installDesktopResizePersistence(panel) {
+        let resizing = false;
+        let saveTimer = null;
+
+        const RESIZE_GRAB_PX = 18;
+
+        const isResizeGrab = (event) => {
+            if (isMobileLayout()) return false;
+            if (!panel.classList.contains('ns-visible')) return false;
+
+            const rect = panel.getBoundingClientRect();
+            const nearRight = event.clientX >= rect.right - RESIZE_GRAB_PX;
+            const nearBottom = event.clientY >= rect.bottom - RESIZE_GRAB_PX;
+
+            return nearRight && nearBottom;
+        };
+
+        panel.addEventListener('mousedown', (event) => {
+            if (!isResizeGrab(event)) return;
+            resizing = true;
+        }, true);
+
+        document.addEventListener('mousemove', () => {
+            if (!resizing) return;
+
+            clearTimeout(saveTimer);
+            saveTimer = setTimeout(() => {
+                saveDesktopGeometry();
+            }, 120);
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (!resizing) return;
+            resizing = false;
+            clearTimeout(saveTimer);
+
+            requestAnimationFrame(() => {
+                saveDesktopGeometry();
+            });
+        });
+    }
+
+    function makeDraggable(panel, handle) {
+        let dragging = false, dx = 0, dy = 0;
+        let dragSaveTimer = null;
+
+        handle.addEventListener('mousedown', (e) => {
+            if (isMobileLayout()) return;
+            if (e.target.closest('button')) return;
+
+            const r = panel.getBoundingClientRect();
+            dragging = true;
+            dx = e.clientX - r.left;
+            dy = e.clientY - r.top;
+            panel.dataset.dragged = '1';
+            panel.style.right = 'auto';
+            panel.style.bottom = 'auto';
+            e.preventDefault();
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (!dragging) return;
+
+            const x = Math.min(window.innerWidth - panel.offsetWidth, Math.max(0, e.clientX - dx));
+            const y = Math.min(window.innerHeight - 38, Math.max(0, e.clientY - dy));
+            panel.style.left = `${x}px`;
+            panel.style.top = `${y}px`;
+
+            // Persist while dragging too, so browser/tab termination does not lose
+            // the latest position if mouseup/pagehide never fires.
+            clearTimeout(dragSaveTimer);
+            dragSaveTimer = setTimeout(() => saveDesktopGeometry(), 120);
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (!dragging) return;
+            dragging = false;
+            clearTimeout(dragSaveTimer);
+            saveDesktopGeometry();
+        });
+    }
+
+    function canQueryTornRelatedApi() {
+        return document.visibilityState === 'visible' && document.hasFocus();
+    }
+
+    async function apiRaw(path, options = {}) {
+        const requestGeneration = state.sessionGeneration;
+        const headers = {
+            'Content-Type': 'application/json',
+            ...(options.headers || {})
+        };
+
+        if (state.token && !options.skipAuth) {
+            headers.Authorization = `Bearer ${state.token}`;
+        }
+
+        return new Promise((resolve, reject) => {
+            GM.xmlHttpRequest({
+                method: options.method || 'GET',
+                url: `${API_BASE}${path}`,
+                headers,
+                data: options.body || undefined,
+                responseType: 'text',
+                timeout: Number(options.timeout || REQUEST_TIMEOUT_MS),
+
+                onload: (response) => {
+                    if (!options.skipAuth && requestGeneration !== state.sessionGeneration) {
+                        reject(sessionEndedError());
+                        return;
+                    }
+                    let data = {};
+                    try {
+                        data = response.responseText ? JSON.parse(response.responseText) : {};
+                    } catch (_) {}
+
+                    if (response.status < 200 || response.status >= 300) {
+                        const err = new Error(data.detail || `HTTP ${response.status}`);
+                        err.status = response.status;
+                        err.data = data;
+                        reject(err);
+                        return;
+                    }
+
+                    resolve(data);
+                },
+
+                onerror: () => reject(new Error('Network request failed')),
+                onabort: () => reject(new Error('Network request aborted')),
+                ontimeout: () => reject(new Error('Network request timed out'))
+            });
+        });
+    }
+
+    function sessionEndedError() {
+        const err = new Error('Chat session ended');
+        err.cancelled = true;
+        return err;
+    }
+
+    function requireCurrentSession(generation, requireSharedRefresh = false) {
+        if (
+            generation !== state.sessionGeneration ||
+            (requireSharedRefresh && !String(GM_getValue(REFRESH_TOKEN_KEY, '') || ''))
+        ) {
+            throw sessionEndedError();
+        }
+    }
+
+    async function refreshAccessToken() {
+        if (state.refreshInFlight) {
+            return state.refreshInFlight;
+        }
+
+        const generation = state.sessionGeneration;
+        state.refreshInFlight = (async () => {
+            // Always prefer the latest shared session values. Another Torn tab may
+            // already have rotated the refresh token.
+            adoptSharedSession();
+
+            if (!state.refreshToken) {
+                throw new Error('No refresh session');
+            }
+
+            const startingRefreshToken = state.refreshToken;
+            const acquired = await acquireRefreshLock(startingRefreshToken);
+
+            if (!acquired) {
+                requireCurrentSession(generation, true);
+                const shared = adoptSharedSession();
+
+                if (
+                    shared.token &&
+                    shared.refreshToken &&
+                    shared.refreshToken !== startingRefreshToken
+                ) {
+                    return {
+                        token: shared.token,
+                        refresh_token: shared.refreshToken,
+                        shared: true,
+                    };
+                }
+
+                throw new Error('Timed out waiting for another chat tab to refresh the session');
+            }
+
+            try {
+                requireCurrentSession(generation, true);
+                // The lock may have been obtained just after another tab completed
+                // a refresh. Re-check storage before using the old token.
+                const currentSharedRefresh = String(
+                    GM_getValue(REFRESH_TOKEN_KEY, '') || ''
+                );
+
+                if (
+                    currentSharedRefresh &&
+                    currentSharedRefresh !== startingRefreshToken
+                ) {
+                    const shared = adoptSharedSession();
+                    return {
+                        token: shared.token,
+                        refresh_token: shared.refreshToken,
+                        shared: true,
+                    };
+                }
+
+                let result;
+
+                try {
+                    result = await apiRaw('/api/session/refresh', {
+                        method: 'POST',
+                        skipAuth: true,
+                        body: JSON.stringify({
+                            refresh_token: startingRefreshToken
+                        })
+                    });
+                } catch (err) {
+                    requireCurrentSession(generation, true);
+                    // If another tab won a very tight race and already rotated the
+                    // token, use its newly-published session instead of logging out.
+                    const newerRefresh = String(
+                        GM_getValue(REFRESH_TOKEN_KEY, '') || ''
+                    );
+                    const newerToken = String(
+                        GM_getValue(TOKEN_KEY, '') || ''
+                    );
+
+                    if (
+                        err.status === 401 &&
+                        newerRefresh &&
+                        newerToken &&
+                        newerRefresh !== startingRefreshToken
+                    ) {
+                        state.token = newerToken;
+                        state.refreshToken = newerRefresh;
+                        return {
+                            token: newerToken,
+                            refresh_token: newerRefresh,
+                            shared: true,
+                        };
+                    }
+
+                    throw err;
+                }
+
+                requireCurrentSession(generation, true);
+                if (!result.token || !result.refresh_token) {
+                    throw new Error('Invalid refresh response');
+                }
+
+                state.token = result.token;
+                state.refreshToken = result.refresh_token;
+
+                GM_setValue(TOKEN_KEY, state.token);
+                GM_setValue(REFRESH_TOKEN_KEY, state.refreshToken);
+
+                if (result.user) {
+                    state.me = result.user;
+                    if (isStaffRole(state.me.role)) {
+                        state.staffRoles[String(state.me.id)] = String(state.me.role).toLowerCase();
+                    } else {
+                        delete state.staffRoles[String(state.me.id)];
+                    }
+                    refreshManageVisibility();
+                }
+                return result;
+            } finally {
+                releaseRefreshLock();
+            }
+        })();
+
+        try {
+            return await state.refreshInFlight;
+        } finally {
+            if (generation === state.sessionGeneration) state.refreshInFlight = null;
+        }
+    }
+
+
+    async function api(path, options = {}) {
+        try {
+            return await apiRaw(path, options);
+        } catch (err) {
+            const canRefresh =
+                err.status === 401 &&
+                !options.skipRefresh &&
+                path !== '/api/auth' &&
+                path !== '/api/session/refresh' &&
+                !!state.refreshToken;
+
+            if (!canRefresh) throw err;
+
+            const refreshBeforeAttempt = state.refreshToken;
+
+            try {
+                await refreshAccessToken();
+            } catch (refreshErr) {
+                if (refreshErr.cancelled) throw refreshErr;
+                const sharedToken = String(GM_getValue(TOKEN_KEY, '') || '');
+                const sharedRefresh = String(GM_getValue(REFRESH_TOKEN_KEY, '') || '');
+
+                // A sibling tab may have completed the rotation between our failed
+                // request and this catch block. Reuse that session before deciding
+                // the device session is genuinely dead.
+                if (
+                    sharedToken &&
+                    sharedRefresh &&
+                    sharedRefresh !== refreshBeforeAttempt
+                ) {
+                    state.token = sharedToken;
+                    state.refreshToken = sharedRefresh;
+                    return apiRaw(path, { ...options, skipRefresh: true });
+                }
+
+                if (refreshErr.status === 401 || refreshErr.status === 403) {
+                    logoutLocal();
+                }
+                throw refreshErr;
+            }
+
+            return apiRaw(path, { ...options, skipRefresh: true });
+        }
+    }
+
+
+    async function loginWithKey() {
+        if (!canQueryTornRelatedApi()) {
+            ui.loginError.textContent = 'Keep the Torn tab visible and focused while verifying your API key.';
+            return;
+        }
+
+        const key = ui.input.value.trim();
+        if (!key) return;
+        const generation = state.sessionGeneration;
+        ui.loginError.textContent = '';
+        ui.loginButton.disabled = true;
+        ui.loginButton.textContent = 'Verifying...';
+        try {
+            // Intentionally never persisted via GM_setValue/localStorage.
+            const result = await api('/api/auth', {
+                method: 'POST',
+                body: JSON.stringify({ api_key: key }),
+            });
+            requireCurrentSession(generation);
+            ui.input.value = '';
+            state.token = result.token;
+            state.refreshToken = result.refresh_token || '';
+            GM_setValue(TOKEN_KEY, state.token);
+            if (state.refreshToken) GM_setValue(REFRESH_TOKEN_KEY, state.refreshToken);
+            state.me = result.user;
+            unmountLoginPanel();
+            state.initialized = false;
+            await loadBootstrap(true);
+            requireCurrentSession(generation);
+            state.initialized = true;
+            startPolling();
+        } catch (err) {
+            ui.input.value = '';
+            if (!err.cancelled) ui.loginError.textContent = err.message || 'Authentication failed';
+        } finally {
+            ui.loginButton.disabled = false;
+            ui.loginButton.textContent = 'Verify and connect';
+        }
+    }
+
+    async function startIfNeeded(renderHistory = true, interactive = true) {
+        if (state.bootstrapInFlight) {
+            return state.bootstrapInFlight;
+        }
+
+        const generation = state.sessionGeneration;
+        state.bootstrapInFlight = (async () => {
+            try {
+                if (!state.token && state.refreshToken) {
+                    await refreshAccessToken();
+                }
+
+                requireCurrentSession(generation);
+                if (!state.token) {
+                    if (interactive) showLogin();
+                    return;
+                }
+
+                // Do not allow polling to use cursor=0 while bootstrap is still loading.
+                state.initialized = false;
+
+                if (state.pollTimer) {
+                    clearTimeout(state.pollTimer);
+                    state.pollTimer = null;
+                }
+
+                await ensureCustomEmojiReady();
+                requireCurrentSession(generation);
+                await loadBootstrap(renderHistory);
+                requireCurrentSession(generation);
+                state.initialized = true;
+                refreshNotifyLeadership();
+                startPolling();
+            } catch (err) {
+                if (err.cancelled) return;
+                state.initialized = false;
+
+                if (err.status === 401 || err.status === 403) {
+                    logoutLocal();
+
+                    if (interactive) {
+                        showLogin(err.status === 403
+                            ? (err.message || 'Chat access was revoked.')
+                            : 'Session expired. Verify again.');
+                    } else {
+                        renderConnectionState('offline');
+                    }
+                } else {
+                    setStatus(`Connection error: ${err.message}`, true);
+                    setTimeout(
+                        () => {
+                            if (generation === state.sessionGeneration && (state.token || state.refreshToken)) {
+                                startIfNeeded(renderHistory, interactive);
+                            }
+                        },
+                        5000
+                    );
+                }
+            }
+        })();
+
+        try {
+            return await state.bootstrapInFlight;
+        } finally {
+            if (generation === state.sessionGeneration) state.bootstrapInFlight = null;
+        }
+    }
+
+    function mountLoginPanel() {
+        if (!ui.panel || !ui.login) return;
+        if (!ui.login.isConnected) {
+            ui.panel.appendChild(ui.login);
+        }
+    }
+
+    function unmountLoginPanel() {
+        if (!ui.login) return;
+        ui.login.classList.remove('ns-show');
+        if (ui.input) ui.input.value = '';
+        if (ui.login.isConnected) {
+            ui.login.remove();
+        }
+    }
+
+    function showLogin(message = '') {
+        buildPanel();
+        mountLoginPanel();
+        ui.panel.classList.add('ns-visible');
+        ui.login.classList.add('ns-show');
+        ui.loginError.textContent = message;
+
+        // Do not programmatically focus a password field. Autofill/password-manager
+        // heuristics commonly run on focus and can target unrelated inputs elsewhere
+        // on the page. The user can click the API-key field when they need it.
+    }
+
+    function signOutExplicitly() {
+        const confirmed = window.confirm(
+            'Sign out of Naughty Souls Chat on this browser?\n\nYou will need to verify your Torn API key again to reconnect.'
+        );
+        if (!confirmed) return;
+
+        // Explicit sign-out is intentionally stronger than automatic logoutLocal().
+        // Tampermonkey storage is shared between Torn tabs, so clear the current
+        // shared credentials even if this tab happens to hold an older in-memory
+        // token after a refresh rotation.
+        GM_deleteValue(TOKEN_KEY);
+        GM_deleteValue(REFRESH_TOKEN_KEY);
+        GM_deleteValue(REFRESH_LOCK_KEY);
+        GM_deleteValue(NOTIFY_LEADER_KEY);
+
+        logoutLocal();
+
+        // Remove decrypted/typed chat content from the visible UI when the user
+        // explicitly signs out. Theme, geometry and other preferences are kept.
+        if (ui.body) ui.body.replaceChildren();
+        if (ui.textarea) ui.textarea.value = '';
+        if (ui.newMessages) ui.newMessages.classList.remove('ns-show');
+        clearReplyTarget();
+
+        if (ui.settings) ui.settings.classList.remove('ns-show');
+        if (ui.manage) ui.manage.classList.remove('ns-show');
+
+        showLogin('Signed out. Verify your Torn API key to reconnect.');
+    }
+
+
+    function logoutLocal() {
+        const oldToken = state.token;
+        const oldRefresh = state.refreshToken;
+        state.sessionGeneration++;
+
+        state.token = '';
+        state.refreshToken = '';
+        state.refreshInFlight = null;
+        state.bootstrapInFlight = null;
+        state.initialized = false;
+        state.cryptoKey = null;
+        state.keyVersion = null;
+        state.lastCursor = 0;
+        state.historyLoaded = 0;
+        state.oldestHistorySeq = 0;
+        state.historyLoading = false;
+        state.historyExhausted = false;
+        state.historyServerExhausted = false;
+        state.replyingTo = null;
+        state.mentionDirectory = { users: [], factions: [] };
+        state.me = null;
+        state.staffRoles = {};
+        state.moderationMembers = [];
+        state.moderationAudit = [];
+        state.roomAccessUsers = [];
+        state.accessActionInFlight = false;
+        state.deletedMessageIds.clear();
+        refreshManageVisibility();
+        state.mentionSuggestions = [];
+        state.mentionSelection = 0;
+        state.seenMessageIds.clear();
+
+        // Only remove the shared values if they are still the exact values this tab
+        // was using. A stale tab must never delete a newer token published by
+        // another tab after refresh rotation.
+        if (String(GM_getValue(TOKEN_KEY, '') || '') === String(oldToken || '')) {
+            GM_deleteValue(TOKEN_KEY);
+        }
+        if (
+            String(GM_getValue(REFRESH_TOKEN_KEY, '') || '') ===
+            String(oldRefresh || '')
+        ) {
+            GM_deleteValue(REFRESH_TOKEN_KEY);
+        }
+
+        releaseNotifyLeadership();
+        releaseRefreshLock();
+
+        if (state.pollTimer) {
+            clearTimeout(state.pollTimer);
+            state.pollTimer = null;
+        }
+
+        state.pollInFlight = false;
+        if (ui.send) ui.send.disabled = true;
+        if (ui.online) renderConnectionState('offline');
+    }
+
+
+    async function loadBootstrap(renderHistory) {
+        const generation = state.sessionGeneration;
+        const data = await api('/api/bootstrap');
+        requireCurrentSession(generation);
+
+        state.roomId = data.room.id;
+        state.roomName = data.room.name;
+        state.keyVersion = data.key_version;
+        state.me = data.user;
+        state.staffRoles = { ...(data.staff_roles || {}) };
+        state.factionNames = { ...state.factionNames, ...(data.faction_names || {}) };
+        refreshManageVisibility();
+        normalizeMentionDirectory(data.mention_directory);
+        if (data.user?.faction_name) {
+            state.factionNames[String(data.user.faction_id)] = data.user.faction_name;
+        }
+        state.maxMessageChars = data.max_message_chars || 1000;
+
+        const latestCursor = Number(data.cursor || 0);
+        const currentUserId = Number(data.user?.id || 0);
+        const savedUnread = GM_getValue(UNREAD_STATE_KEY, null);
+        const savedUserId = Number(savedUnread?.userId || 0);
+        const savedReadSeq = Number(savedUnread?.lastReadSeq);
+        const sameStoredUser =
+            !savedUserId ||
+            !currentUserId ||
+            savedUserId === currentUserId;
+
+        if (!sameStoredUser) {
+            // Shared userscript storage can survive switching Torn accounts.
+            // Never carry one account's unread/read watermark into another.
+            state.unreadMessageIds.clear();
+            state.mentionUnreadMessageIds.clear();
+            state.unread = 0;
+            state.mentionUnread = 0;
+            state.lastReadSeq = latestCursor;
+            state.unreadStateHasReadSeq = true;
+            state.unreadStateUserId = currentUserId;
+            saveSharedUnread();
+        } else if (!(Number.isFinite(savedReadSeq) && savedReadSeq >= 0)) {
+            // v0.1.58 and older had no read watermark. Start from the current
+            // server cursor so upgrading does not mark the entire room history unread.
+            state.lastReadSeq = latestCursor;
+            state.unreadStateHasReadSeq = true;
+            state.unreadStateUserId = currentUserId;
+            saveSharedUnread();
+        } else {
+            state.lastReadSeq = Math.max(0, Math.floor(savedReadSeq));
+            state.unreadStateHasReadSeq = true;
+            state.unreadStateUserId = currentUserId;
+        }
+
+        const activelyViewing =
+            renderHistory &&
+            isPageActive() &&
+            ui.panel?.classList.contains('ns-visible') &&
+            !ui.panel?.classList.contains('ns-minimized');
+
+        // Closed/background startup begins polling from the last message the user
+        // actually read, not simply from "latest". This recovers messages that
+        // arrived while the browser/userscript was completely offline.
+        state.lastCursor = activelyViewing
+            ? latestCursor
+            : Math.min(latestCursor, Math.max(0, state.lastReadSeq));
+
+        ui.title.textContent = state.roomName;
+        ui.textarea.maxLength = state.maxMessageChars;
+        const cryptoKey = await importRoomKey(data.room_key);
+        requireCurrentSession(generation);
+        state.cryptoKey = cryptoKey;
+
+        if (renderHistory) {
+            ui.body.textContent = '';
+            state.seenMessageIds.clear();
+
+            const initialHistory = data.history || [];
+            state.historyLoaded = initialHistory.length;
+            state.oldestHistorySeq = initialHistory.length
+                ? Number(initialHistory[0].seq || 0)
+                : 0;
+            state.historyServerExhausted =
+                initialHistory.length < HISTORY_PAGE_SIZE;
+            state.historyExhausted =
+                state.historyServerExhausted ||
+                state.historyLoaded >= HISTORY_MAX_LOADED;
+
+            for (const msg of initialHistory) {
+                rememberMessage(msg);
+                const renderInfo = await renderEncryptedMessage(msg);
+
+                if (
+                    !activelyViewing &&
+                    !renderInfo?.suppressUnread &&
+                    Number(msg.seq || 0) > state.lastReadSeq &&
+                    Number(msg.sender_id) !== Number(state.me?.id)
+                ) {
+                    addSharedUnread(
+                        msg.message_id,
+                        Boolean(renderInfo?.mentionsMe),
+                        Number(msg.seq || 0)
+                    );
+                }
+            }
+            scrollBottom();
+
+            if (activelyViewing) {
+                clearSharedUnread(latestCursor);
+            }
+        }
+
+        ui.send.disabled = false;
+        renderConnectionState('Connecting');
+        setStatus(`${state.me.name} · ${state.me.faction_name || state.factionNames[String(state.me.faction_id)] || `Faction ${state.me.faction_id}`}`);
+    }
+
+
+    function isPageActive() {
+        return !document.hidden && document.hasFocus();
+    }
+
+    function pollDelay() {
+        if (!isPageActive()) return POLL_BACKGROUND_MS;
+
+        const visible = ui.panel?.classList.contains('ns-visible');
+        return visible ? POLL_OPEN_MS : POLL_CLOSED_MS;
+    }
+
+    function schedulePoll(delay = pollDelay()) {
+        if (!state.token || !state.initialized) return;
+
+        if (state.pollTimer) {
+            clearTimeout(state.pollTimer);
+            state.pollTimer = null;
+        }
+
+        state.pollTimer = setTimeout(async () => {
+            state.pollTimer = null;
+            await pollOnce();
+            schedulePoll();
+        }, Math.max(0, delay));
+    }
+
+    function startPolling() {
+        if (!state.token || !state.initialized) return;
+        schedulePoll(0);
+    }
+
+    function rememberMessage(msg) {
+        if (!msg?.message_id) return false;
+        if (state.seenMessageIds.has(msg.message_id)) return false;
+
+        state.seenMessageIds.add(msg.message_id);
+        if (state.seenMessageIds.size > 1000) {
+            const first = state.seenMessageIds.values().next().value;
+            if (first) state.seenMessageIds.delete(first);
+        }
+        return true;
+    }
+
+    async function loadOlderHistory(forceBeyondCap = false) {
+        if (!state.token || !state.cryptoKey) return false;
+        if (state.historyLoading || state.historyServerExhausted) return false;
+
+        if (!forceBeyondCap && state.historyLoaded >= HISTORY_MAX_LOADED) {
+            state.historyExhausted = true;
+            return false;
+        }
+
+        if (!state.oldestHistorySeq) {
+            state.historyServerExhausted = true;
+            state.historyExhausted = true;
+            return false;
+        }
+
+        state.historyLoading = true;
+
+        try {
+            const remaining = forceBeyondCap
+                ? HISTORY_PAGE_SIZE
+                : Math.max(1, HISTORY_MAX_LOADED - state.historyLoaded);
+            const limit = Math.min(HISTORY_PAGE_SIZE, remaining);
+            const before = state.oldestHistorySeq;
+
+            const oldScrollHeight = ui.body.scrollHeight;
+            const oldScrollTop = ui.body.scrollTop;
+
+            const data = await api(
+                `/api/messages/history?before=${encodeURIComponent(before)}&limit=${encodeURIComponent(limit)}`
+            );
+
+            if (Number(data.key_version) !== Number(state.keyVersion)) {
+                await loadBootstrap(true);
+                return;
+            }
+
+            state.factionNames = {
+                ...state.factionNames,
+                ...(data.faction_names || {})
+            };
+
+            const messages = data.messages || [];
+            if (!messages.length) {
+                state.historyServerExhausted = true;
+                state.historyExhausted = true;
+                return false;
+            }
+
+            // renderEncryptedMessage prepends one node at a time. Walk newest-to-oldest
+            // so the final DOM order remains chronological.
+            for (const msg of [...messages].reverse()) {
+                if (!rememberMessage(msg)) continue;
+                await renderEncryptedMessage(msg, true);
+            }
+
+            state.historyLoaded += messages.length;
+            state.oldestHistorySeq = Number(messages[0]?.seq || state.oldestHistorySeq);
+
+            const serverDone =
+                messages.length < limit ||
+                data.has_more === false;
+
+            if (serverDone) {
+                state.historyServerExhausted = true;
+            }
+
+            state.historyExhausted =
+                state.historyServerExhausted ||
+                (!forceBeyondCap && state.historyLoaded >= HISTORY_MAX_LOADED);
+
+            // Keep the same message under the user's eyes after prepending history.
+            const addedHeight = ui.body.scrollHeight - oldScrollHeight;
+            ui.body.scrollTop = oldScrollTop + addedHeight;
+
+            return true;
+        } catch (err) {
+            if (err.status === 401 || err.status === 403) {
+                logoutLocal();
+                showLogin(
+                    err.status === 403
+                        ? (err.message || 'Chat access was revoked.')
+                        : 'Session expired. Verify again.'
+                );
+            }
+            return false;
+        } finally {
+            state.historyLoading = false;
+        }
+    }
+
+    async function pollOnce(force = false) {
+        if (!state.token || !state.initialized || state.pollInFlight) return;
+
+        const pageActive = isPageActive();
+
+        // Active Torn tabs may always poll. When Torn is hidden/unfocused, only
+        // the one tab holding the short notification lease is allowed to poll.
+        if (!force && !pageActive && !refreshNotifyLeadership()) return;
+
+        state.pollInFlight = true;
+
+        try {
+            const data = await api(
+                `/api/messages?cursor=${encodeURIComponent(state.lastCursor)}&limit=100`
+            );
+
+            if (Number(data.key_version) !== Number(state.keyVersion)) {
+                addSystem('Room encryption key rotated. Loading the new key...');
+                await loadBootstrap(true);
+                state.pollFailures = 0;
+                return;
+            }
+
+            state.factionNames = {
+                ...state.factionNames,
+                ...(data.faction_names || {})
+            };
+
+            for (const msg of data.messages || []) {
+                const msgSeq = Number(msg.seq || 0);
+
+                state.lastCursor = Math.max(
+                    state.lastCursor,
+                    msgSeq
+                );
+
+                if (!rememberMessage(msg)) continue;
+
+                const renderInfo = await renderEncryptedMessage(msg);
+
+                const panelClosed = !ui.panel.classList.contains('ns-visible');
+                const minimized = ui.panel.classList.contains('ns-minimized');
+                const pageInactive = !isPageActive();
+                const fromOtherUser =
+                    msg.type === 'message' &&
+                    Number(msg.sender_id) !== Number(state.me?.id);
+
+                // "Open" does not automatically mean "read": if the user has
+                // scrolled up, preserve the unread badge and show the in-chat
+                // new-message button instead of yanking them to the bottom.
+                const wasActivelyViewingLive =
+                    !panelClosed &&
+                    !minimized &&
+                    !pageInactive &&
+                    Boolean(renderInfo?.wasNearBottom);
+
+                if (
+                    fromOtherUser &&
+                    !renderInfo?.suppressUnread &&
+                    !wasActivelyViewingLive &&
+                    (isPageActive() || state.notifyLeader)
+                ) {
+                    addSharedUnread(
+                        msg.message_id,
+                        Boolean(renderInfo?.mentionsMe),
+                        msgSeq
+                    );
+                }
+            }
+
+            state.lastCursor = Math.max(
+                state.lastCursor,
+                Number(data.cursor || 0)
+            );
+
+            const activelyAtLiveEdge =
+                isPageActive() &&
+                ui.panel.classList.contains('ns-visible') &&
+                !ui.panel.classList.contains('ns-minimized') &&
+                isNearBottom();
+
+            if (activelyAtLiveEdge) {
+                clearSharedUnread(state.lastCursor);
+            }
+
+            state.pollFailures = 0;
+            renderConnectionState('Connected');
+            setStatus(`${state.me.name} · ${state.me.faction_name || state.factionNames[String(state.me.faction_id)] || `Faction ${state.me.faction_id}`}`);
+        } catch (err) {
+            if (err.status === 401 || err.status === 403) {
+                logoutLocal();
+                showLogin(
+                    err.status === 403
+                        ? (err.message || 'Chat access was revoked.')
+                        : 'Session expired. Verify again.'
+                );
+                return;
+            }
+
+            state.pollFailures++;
+            if (state.pollFailures >= 3) {
+                renderConnectionState('offline');
+                setStatus(`Chat reconnecting: ${err.message}`, true);
+            }
+        } finally {
+            state.pollInFlight = false;
+        }
+    }
+
+
+    async function sendMessage() {
+        const originalText = ui.textarea.value;
+        const visibleText = originalText.trim();
+
+        if (!visibleText || !state.cryptoKey || !state.token) return;
+
+        if (visibleText.length > state.maxMessageChars) {
+            addSystem(
+                `Message is too long (${visibleText.length}/${state.maxMessageChars} characters).`,
+                true
+            );
+            return;
+        }
+
+        const emojiText = replaceEmojiShortcodes(originalText);
+        const text = encodeMentions(emojiText).trim();
+
+        if (!text) return;
+
+        const encryptedPlaintext = encodeMessageEnvelope(text, state.replyingTo);
+
+        ui.textarea.value = '';
+        closeMentionMenu();
+        ui.emojiPicker?.classList.remove('ns-show');
+        ui.send.disabled = true;
+
+        try {
+            const encrypted = await encryptText(encryptedPlaintext);
+
+            const result = await api('/api/messages', {
+                method: 'POST',
+                body: JSON.stringify({
+                    key_version: state.keyVersion,
+                    nonce: encrypted.nonce,
+                    ciphertext: encrypted.ciphertext,
+                }),
+            });
+
+            if (Number(result.key_version) !== Number(state.keyVersion)) {
+                await loadBootstrap(true);
+                return;
+            }
+
+            // IMPORTANT: do not advance lastCursor from the POST response.
+            // Another user's message may have received a lower sequence between
+            // our previous poll and this send. The immediate poll below retrieves
+            // every missing sequence; rememberMessage() suppresses our own duplicate.
+            // Let the immediate poll render the accepted message in sequence order.
+            // This avoids placing our own seq=102 above an unseen seq=101 message
+            // that was sent by somebody else just before our POST completed.
+            clearReplyTarget();
+            schedulePoll(0);
+        } catch (err) {
+            if (err.status === 409) {
+                ui.textarea.value = originalText;
+                addSystem('Room key changed. Refreshing encryption state...', true);
+                try {
+                    await loadBootstrap(true);
+                } catch (_) {}
+            } else if (err.status === 423) {
+                ui.textarea.value = originalText;
+                addSystem(err.message || 'You are currently muted.', true);
+            } else if (err.status === 401 || err.status === 403) {
+                ui.textarea.value = originalText;
+                logoutLocal();
+                showLogin(err.message || 'Session expired or chat access was revoked.');
+            } else {
+                ui.textarea.value = originalText;
+                addSystem(`Could not send message: ${err.message}`, true);
+            }
+        } finally {
+            ui.send.disabled = !state.token || !state.cryptoKey;
+        }
+    }
+
+
+    async function importRoomKey(keyB64) {
+        const raw = fromB64(keyB64);
+        return crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+    }
+
+    function aadBytes(version) {
+        return new TextEncoder().encode(`${state.roomId}:${version}`);
+    }
+
+    async function encryptText(text) {
+        const nonce = crypto.getRandomValues(new Uint8Array(12));
+        const plain = new TextEncoder().encode(text);
+        const cipher = await crypto.subtle.encrypt(
+            { name: 'AES-GCM', iv: nonce, additionalData: aadBytes(state.keyVersion), tagLength: 128 },
+            state.cryptoKey,
+            plain,
+        );
+        return { nonce: toB64(nonce), ciphertext: toB64(new Uint8Array(cipher)) };
+    }
+
+    async function decryptMessage(msg) {
+        if (!state.cryptoKey || msg.key_version !== state.keyVersion) throw new Error('Unknown key version');
+        const plain = await crypto.subtle.decrypt(
+            {
+                name: 'AES-GCM',
+                iv: fromB64(msg.nonce),
+                additionalData: aadBytes(msg.key_version),
+                tagLength: 128,
+            },
+            state.cryptoKey,
+            fromB64(msg.ciphertext),
+        );
+        return new TextDecoder().decode(plain);
+    }
+
+    async function renderEncryptedMessage(msg, prepend = false) {
+        const generation = state.sessionGeneration;
+        const wasNearBottom = prepend ? false : isNearBottom();
+
+        if (msg?.type === 'message_deleted') {
+            markMessageDeleted(msg.target_message_id);
+            return {
+                mentionsMe: false,
+                wasNearBottom,
+                suppressUnread: true,
+            };
+        }
+
+        const deleted = Boolean(msg?.deleted) || state.deletedMessageIds.has(String(msg?.message_id || ''));
+        let text = '';
+        let reply = null;
+        if (!deleted) {
+            try {
+                const decrypted = await decryptMessage(msg);
+                const payload = decodeMessageEnvelope(decrypted);
+                text = payload.text;
+                reply = payload.reply;
+            } catch (_) {
+                text = '[Unable to decrypt this message]';
+            }
+        }
+        requireCurrentSession(generation);
+
+        const wrap = el('div', `ns-msg${deleted ? ' ns-deleted' : ''}`);
+        wrap.dataset.messageId = String(msg.message_id || '');
+        wrap.dataset.seq = String(msg.seq || '');
+        const meta = el('div', 'ns-meta');
+
+        // Avoid Torn/BSP player-list patterns: no ".user.name", no visible
+        // [playerId], and no profile <a href> in the message DOM.
+        const name = el('span', 'ns-name', msg.sender_name || 'Unknown user');
+        name.dataset.naughtySoulsSender = '1';
+        name.dataset.playerId = String(msg.sender_id || '');
+        name.setAttribute('role', 'link');
+        name.setAttribute('tabindex', '0');
+
+        const openProfile = () => {
+            const playerId = Number(msg.sender_id || 0);
+            if (!playerId) return;
+            window.open(
+                `https://www.torn.com/profiles.php?XID=${encodeURIComponent(playerId)}`,
+                '_blank',
+                'noopener,noreferrer'
+            );
+        };
+
+        name.addEventListener('click', openProfile);
+        name.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                openProfile();
+            }
+        });
+
+        const factionName =
+            msg.faction_name ||
+            state.factionNames[String(msg.faction_id)] ||
+            `Faction ${msg.faction_id}`;
+
+        const faction = el('span', 'ns-faction', `[${factionName}]`);
+        const stamp = el('span', 'ns-time', formatTime(msg.created_at));
+        stamp.title = formatLocalTime(msg.created_at);
+        const body = el('div', 'ns-text');
+
+        let mentionsMe = false;
+        if (deleted) {
+            body.appendChild(el('span', 'ns-deleted-text', '[message removed by moderator]'));
+            state.deletedMessageIds.add(String(msg.message_id || ''));
+        } else {
+            // Still no innerHTML: plaintext pieces are Text nodes and recognized
+            // mention tokens become spans created by this userscript.
+            const parsed = parseMentionTokenText(text);
+            mentionsMe = parsed.mentionsMe;
+            body.appendChild(parsed.fragment);
+        }
+
+        meta.append(name, faction, stamp);
+
+        if (!deleted) {
+            const replyButton = el('button', 'ns-reply-button', '↩');
+            replyButton.type = 'button';
+            replyButton.title = `Reply to ${msg.sender_name || 'message'}`;
+            replyButton.setAttribute('aria-label', replyButton.title);
+            replyButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                setReplyTarget(msg);
+            });
+            meta.appendChild(replyButton);
+        }
+
+        if (!deleted && isStaffRole() && canModerateTarget(msg.sender_id)) {
+            const deleteButton = el('button', 'ns-mod-delete', '×');
+            deleteButton.type = 'button';
+            deleteButton.title = 'Delete message';
+            deleteButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                deleteMessageAsModerator(msg);
+            });
+            meta.appendChild(deleteButton);
+        }
+
+        wrap.appendChild(meta);
+
+        if (!deleted && reply?.messageId) {
+            const replyRef = buildReplyReference(reply);
+            if (replyRef) wrap.appendChild(replyRef);
+        }
+
+        wrap.appendChild(body);
+
+        if (prepend) {
+            ui.body.insertBefore(wrap, ui.body.firstChild);
+        } else {
+            ui.body.appendChild(wrap);
+            pruneRenderedMessages();
+
+            if (wasNearBottom) {
+                scrollBottom();
+            } else {
+                ui.newMessages?.classList.add('ns-show');
+            }
+        }
+
+        return {
+            mentionsMe,
+            wasNearBottom,
+            suppressUnread: deleted,
+        };
+    }
+
+
+
+    function addSystem(text, isError = false) {
+        const node = el('div', `ns-system${isError ? ' ns-error' : ''}`, text);
+        ui.body.appendChild(node);
+        scrollBottom();
+    }
+
+    function setStatus(text, isError = false) {
+        if (!ui.status) return;
+        ui.status.textContent = text;
+        ui.status.classList.toggle('ns-error', !!isError);
+    }
+
+    function parseServerTimestamp(value) {
+        let text = String(value || '').trim();
+        if (!text) return null;
+
+        // Older MongoDB reads could serialize a UTC datetime without an explicit
+        // offset. Treat those legacy values as UTC instead of the viewer's local
+        // timezone, which is what caused "wacky" cross-timezone timestamps.
+        if (
+            /^\d{4}-\d{2}-\d{2}T/.test(text) &&
+            !/(?:Z|[+-]\d{2}:\d{2})$/i.test(text)
+        ) {
+            text += 'Z';
+        }
+
+        const d = new Date(text);
+        return Number.isNaN(d.getTime()) ? null : d;
+    }
+
+    function formatTime(value) {
+        const d = parseServerTimestamp(value);
+        if (!d) return '';
+
+        // Torn City Time is UTC. Work in UTC calendar days so the label changes
+        // at TCT midnight regardless of the viewer's local timezone.
+        const now = new Date();
+        const todayTct = Date.UTC(
+            now.getUTCFullYear(),
+            now.getUTCMonth(),
+            now.getUTCDate()
+        );
+        const messageDayTct = Date.UTC(
+            d.getUTCFullYear(),
+            d.getUTCMonth(),
+            d.getUTCDate()
+        );
+        const daysAgo = Math.floor((todayTct - messageDayTct) / 86400000);
+
+        if (daysAgo === 0) {
+            const hh = String(d.getUTCHours()).padStart(2, '0');
+            const mm = String(d.getUTCMinutes()).padStart(2, '0');
+            return `today: ${hh}:${mm} TCT`;
+        }
+
+        if (daysAgo === 1) return '1 day ago';
+        if (daysAgo === 2) return '2 days ago';
+
+        const dd = String(d.getUTCDate()).padStart(2, '0');
+        const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+        const yy = String(d.getUTCFullYear()).slice(-2);
+        return `${dd}/${mm}-${yy}`;
+    }
+
+    function formatLocalTime(value) {
+        const d = parseServerTimestamp(value);
+        if (!d) return '';
+
+        const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'local time';
+        return `Your local time: ${d.toLocaleString([], {
+            year: 'numeric',
+            month: 'short',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+        })} (${zone})`;
+    }
+
+    function isNearBottom() {
+        if (!ui.body) return true;
+        return ui.body.scrollHeight - ui.body.scrollTop - ui.body.clientHeight <= 40;
+    }
+
+    function pruneRenderedMessages() {
+        if (!ui.body) return;
+
+        const nodes = ui.body.querySelectorAll('.ns-msg');
+        const excess = nodes.length - MAX_RENDERED_MESSAGES;
+        if (excess <= 0) return;
+
+        for (let i = 0; i < excess; i++) {
+            nodes[i]?.remove();
+        }
+    }
+
+    function scrollBottom() {
+        if (!ui.body) return;
+        ui.body.scrollTop = ui.body.scrollHeight;
+        ui.newMessages?.classList.remove('ns-show');
+    }
+
+
+    function toB64(bytes) {
+        // Firefox/WebExtension compatibility:
+        // Uint8Array views backed by an ArrayBuffer returned across extension/page
+        // compartments can throw:
+        //   Permission denied to access property "constructor"
+        // when methods such as subarray()/slice() are called.
+        //
+        // Direct indexed reads avoid that cross-compartment typed-array method path.
+        // Chat payloads are small (max message size is bounded), so the simple loop
+        // is also cheap enough here.
+        let binary = '';
+        for (let i = 0; i < bytes.length; i++) {
+            binary += String.fromCharCode(bytes[i]);
+        }
+        return btoa(binary);
+    }
+
+    function fromB64(value) {
+        const binary = atob(value);
+        const out = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+        return out;
+    }
+
+    function updateBadge() {
+        const launcher = document.getElementById(LAUNCHER_ID);
+        const badge = launcher?.querySelector('.ns-badge');
+        if (!badge) return;
+
+        if (state.mentionUnread > 0) {
+            const mentionCount = state.mentionUnread > 99 ? '99+' : String(state.mentionUnread);
+            badge.textContent = `@${mentionCount}`;
+            badge.classList.add('ns-mention-badge');
+        } else {
+            badge.textContent = state.unread > 99 ? '99+' : String(state.unread);
+            badge.classList.remove('ns-mention-badge');
+        }
+
+        badge.classList.toggle('ns-show', state.unread > 0);
+    }
+
+    if (typeof GM_addValueChangeListener === 'function') {
+        GM_addValueChangeListener(UI_STATE_KEY, (_name, _oldValue, newValue, remote) => {
+            if (!remote) return;
+            applySyncedUiState(newValue);
+        });
+
+        GM_addValueChangeListener(DESKTOP_GEOMETRY_KEY, (_name, _oldValue, newValue, remote) => {
+            if (!remote || isMobileLayout()) return;
+            if (!newValue || typeof newValue !== 'object') return;
+
+            const panel = ui.panel;
+            if (!panel) return;
+
+            panel.dataset.syncingUi = '1';
+            restoreDesktopGeometry(newValue);
+
+            setTimeout(() => {
+                if (panel) delete panel.dataset.syncingUi;
+            }, 250);
+        });
+
+        GM_addValueChangeListener(THEME_KEY, (_name, _oldValue, newValue, remote) => {
+            if (!remote) return;
+            applyTheme(newValue, false);
+        });
+
+        GM_addValueChangeListener(IMAGE_PREVIEW_KEY, (_name, _oldValue, newValue, remote) => {
+            if (!remote) return;
+            applyExternalImagePreviewSetting(newValue !== false, false);
+        });
+
+        GM_addValueChangeListener(UPDATE_AVAILABLE_KEY, (_name, _oldValue, newValue, remote) => {
+            if (!remote) return;
+            state.updateAvailable = String(newValue || '');
+            renderConnectionState();
+        });
+
+        GM_addValueChangeListener(TOKEN_KEY, (_name, _oldValue, newValue, remote) => {
+            if (!remote) return;
+            if (!newValue) logoutLocal();
+            else state.token = String(newValue);
+        });
+
+        GM_addValueChangeListener(REFRESH_TOKEN_KEY, (_name, _oldValue, newValue, remote) => {
+            if (!remote) return;
+            if (!newValue) logoutLocal();
+            else state.refreshToken = String(newValue);
+        });
+
+        GM_addValueChangeListener(UNREAD_STATE_KEY, (_name, _oldValue, newValue, remote) => {
+            if (!remote) return;
+            applySharedUnreadValue(newValue);
+        });
+
+        GM_addValueChangeListener(NOTIFY_LEADER_KEY, (_name, _oldValue, newValue, remote) => {
+            if (!remote) return;
+
+            state.notifyLeader =
+                newValue?.tabId === TAB_ID &&
+                Number(newValue?.expiresAt || 0) > Date.now();
+
+            // If another tab releases/expires the lease while this one is hidden,
+            // the heartbeat will acquire it shortly; waking here reduces the gap.
+            if (!isPageActive() && state.initialized && !newValue?.tabId) {
+                refreshNotifyLeadership();
+                if (state.notifyLeader) schedulePoll(0);
+            }
+        });
+    }
+
+    function boot() {
+        preloadThemeAssets();
+        loadSharedUnread();
+        startNotifyLeadership();
+
+        addStyles();
+        buildPanel();
+        ensureCustomEmojiReady();
+        installLauncher();
+
+        // Run after buildPanel so a discovered update can be rendered immediately.
+        checkForUserscriptUpdate();
+
+        const savedUi = loadUiState();
+
+        if (savedUi.visible) {
+            startIfNeeded(true, true);
+        } else if (state.token || state.refreshToken) {
+            // Critical notification fix: establish the current cursor and start
+            // polling even when NS chat begins closed. Do this silently so an
+            // expired session does not pop the chat open by itself.
+            startIfNeeded(false, false);
+        }
+    }
+
+    // Torn is React-heavy and can rebuild the chat tree after navigation.
+    // Re-running these functions is safe and restores only our launcher if needed.
+    let observerQueued = false;
+    const observer = new MutationObserver(() => {
+        if (observerQueued) return;
+        observerQueued = true;
+        setTimeout(() => {
+            observerQueued = false;
+            installLauncher();
+        }, 250);
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+
+    // Torn Chat 3.1 may open/close the mobile grouped-chat UI mainly through
+    // class/state changes. Re-check shortly after clicks inside chatRoot so NS
+    // follows the grouped menu even when there was no childList mutation.
+    document.addEventListener('click', (event) => {
+        if (!isMobileLayout()) return;
+        if (!(event.target instanceof Element)) return;
+        if (!event.target.closest('#chatRoot')) return;
+        setTimeout(installLauncher, 80);
+        setTimeout(installLauncher, 300);
+    }, true);
+
+    if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', () => {
+            if (isMobileLayout()) updateMobileViewport();
+        });
+        window.visualViewport.addEventListener('scroll', () => {
+            if (isMobileLayout()) updateMobileViewport();
+        });
+    }
+
+    const mobileMediaQuery = window.matchMedia(MOBILE_MEDIA);
+    if (typeof mobileMediaQuery.addEventListener === 'function') {
+        mobileMediaQuery.addEventListener('change', () => updateMobileViewport());
+    }
+
+    const adjustForMobileKeyboard = () => {
+        if (!isMobileLayout()) return;
+        requestAnimationFrame(() => updateMobileViewport(true));
+        setTimeout(() => updateMobileViewport(true), 120);
+        setTimeout(() => updateMobileViewport(true), 300);
+    };
+
+    document.addEventListener('focusin', (event) => {
+        if (event.target === ui.textarea || event.target === ui.input) adjustForMobileKeyboard();
+    });
+
+    document.addEventListener('focusout', (event) => {
+        if (event.target === ui.textarea || event.target === ui.input) {
+            setTimeout(() => updateMobileViewport(), 180);
+            setTimeout(() => updateMobileViewport(), 320);
+        }
+    });
+
+    const wakePolling = () => {
+        if ((!state.token && !state.refreshToken) || !isPageActive()) return;
+
+        const panelVisible = ui.panel?.classList.contains('ns-visible');
+
+        if (!state.initialized || !state.cryptoKey) {
+            startIfNeeded(Boolean(panelVisible), Boolean(panelVisible));
+            return;
+        }
+
+        schedulePoll(0);
+    };
+
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') {
+            saveCurrentPanelGeometry();
+        }
+
+        refreshNotifyLeadership();
+        wakePolling();
+
+        if (state.initialized) {
+            // On both hide and show, replace any stale timer with the correct
+            // foreground/background cadence immediately.
+            schedulePoll(0);
+        }
+    });
+
+    window.addEventListener('focus', () => {
+        refreshNotifyLeadership();
+        wakePolling();
+        checkForUserscriptUpdate();
+
+        if (state.initialized) {
+            schedulePoll(0);
+        }
+    });
+
+    let desktopViewportClampTimer = null;
+    window.addEventListener('resize', () => {
+        if (isMobileLayout()) return;
+
+        clearTimeout(desktopViewportClampTimer);
+        desktopViewportClampTimer = setTimeout(() => {
+            restoreDesktopGeometry();
+        }, 200);
+    });
+
+    window.addEventListener('pagehide', () => {
+        saveCurrentPanelGeometry();
+
+        if (state.pollTimer) {
+            clearTimeout(state.pollTimer);
+            state.pollTimer = null;
+        }
+
+        if (state.notifyHeartbeatTimer) {
+            clearInterval(state.notifyHeartbeatTimer);
+            state.notifyHeartbeatTimer = null;
+        }
+
+        releaseNotifyLeadership();
+        if (!state.refreshInFlight) releaseRefreshLock();
+    });
+
+    boot();
+})();
