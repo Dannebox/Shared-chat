@@ -3,7 +3,7 @@
 // @namespace    naughty.souls.shared.chat
 // @updateURL   https://raw.githubusercontent.com/Dannebox/Shared-chat/main/naughty_souls/Chat.user.js
 // @downloadURL https://raw.githubusercontent.com/Dannebox/Shared-chat/main/naughty_souls/Chat.user.js
-// @version      0.1.2
+// @version      0.1.3
 // @description  Secure shared chat for approved Torn factions using CSP-safe HTTP polling; does not scrape Torn pages.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -185,7 +185,7 @@
         seenMessageIds: new Set(),
         factionNames: {},
         theme: loadSavedTheme(),
-        externalImagePreviews: GM_getValue(IMAGE_PREVIEW_KEY, true) !== false,
+        externalImagePreviews: GM_getValue(IMAGE_PREVIEW_KEY, false) === true,
         updateAvailable: GM_getValue(UPDATE_AVAILABLE_KEY, ''),
         historyLoaded: 0,
         oldestHistorySeq: 0,
@@ -5029,7 +5029,7 @@
 
         GM_addValueChangeListener(IMAGE_PREVIEW_KEY, (_name, _oldValue, newValue, remote) => {
             if (!remote) return;
-            applyExternalImagePreviewSetting(newValue !== false, false);
+            applyExternalImagePreviewSetting(newValue === true, false);
         });
 
         GM_addValueChangeListener(UPDATE_AVAILABLE_KEY, (_name, _oldValue, newValue, remote) => {

@@ -3,7 +3,7 @@
 // @namespace    almanac.shared.chat
 // @updateURL   https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
 // @downloadURL https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
-// @version      0.1.72
+// @version      0.1.73
 // @description  Secure shared chat for approved Torn factions using CSP-safe HTTP polling; does not scrape Torn pages.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -179,7 +179,7 @@
         seenMessageIds: new Set(),
         factionNames: {},
         theme: THEMES.has(GM_getValue(THEME_KEY, 'default')) ? GM_getValue(THEME_KEY, 'default') : 'default',
-        externalImagePreviews: GM_getValue(IMAGE_PREVIEW_KEY, true) !== false,
+        externalImagePreviews: GM_getValue(IMAGE_PREVIEW_KEY, false) === true,
         updateAvailable: GM_getValue(UPDATE_AVAILABLE_KEY, ''),
         historyLoaded: 0,
         oldestHistorySeq: 0,
@@ -5044,7 +5044,7 @@
 
         GM_addValueChangeListener(IMAGE_PREVIEW_KEY, (_name, _oldValue, newValue, remote) => {
             if (!remote) return;
-            applyExternalImagePreviewSetting(newValue !== false, false);
+            applyExternalImagePreviewSetting(newValue === true, false);
         });
 
         GM_addValueChangeListener(UPDATE_AVAILABLE_KEY, (_name, _oldValue, newValue, remote) => {
