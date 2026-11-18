@@ -3,7 +3,7 @@
 // @namespace    almanac.shared.chat
 // @updateURL   https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
 // @downloadURL https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
-// @version      0.1.73
+// @version      0.1.74
 // @description  Secure shared chat for approved Torn factions using CSP-safe HTTP polling; does not scrape Torn pages.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -3409,11 +3409,43 @@
         if (!launcher) return;
 
         const wrapper = launcher.parentElement;
+        const dock = wrapper?.dataset?.allianceWrapper === '1' ? wrapper.parentElement : wrapper;
         if (wrapper?.dataset?.allianceWrapper === '1') {
             wrapper.remove();
         } else {
             launcher.remove();
         }
+        if (dock?.dataset?.sharedChatPdaLaunchers === '1' && !dock.children.length) {
+            dock.remove();
+        }
+    }
+
+    function isPdaWebChatSuppressed() {
+        // PDA 4 can block the web chat bundle entirely or hide its root.
+        // __pdaNoTchat is the blocked-chat hint checked by PDA itself.
+        if (window.__pdaNoTchat) return true;
+        if (!window.__tornpda?.tab) return false;
+
+        const root = document.getElementById('chatRoot');
+        return !root || !root.children.length || window.getComputedStyle(root).display === 'none';
+    }
+
+    function getPdaLauncherDock() {
+        let dock = document.querySelector('[data-shared-chat-pda-launchers="1"]');
+        if (!dock) {
+            dock = el('div');
+            dock.dataset.sharedChatPdaLaunchers = '1';
+            Object.assign(dock.style, {
+                position: 'fixed',
+                right: 'max(8px, env(safe-area-inset-right, 0px))',
+                bottom: 'calc(72px + env(safe-area-inset-bottom, 0px))',
+                display: 'flex',
+                gap: '8px',
+                zIndex: '2147483646',
+            });
+            document.body.appendChild(dock);
+        }
+        return dock;
     }
 
     function mobileContainerHasLauncherRoom(controlsContainer) {
@@ -3450,37 +3482,47 @@
     }
 
     function installLauncher() {
+        const chatRoot = document.getElementById('chatRoot');
+        if (chatRoot !== observedChatRoot) {
+            chatVisibilityObserver.disconnect();
+            observedChatRoot = chatRoot;
+            if (chatRoot) {
+                chatVisibilityObserver.observe(chatRoot, { attributes: true, attributeFilter: ['class', 'style'] });
+            }
+        }
+
         // Torn Chat 2.0/3.0 used channel_panel_button:faction-* while
         // Chat 3.1 uses chat_panel_button:faction. Support both without
         // depending on Torn's build-hashed CSS class names.
-        const factionButton = document.querySelector(
+        const factionButton = [...document.querySelectorAll(
             '[id^="channel_panel_button:faction-"], [id^="chat_panel_button:faction"]'
-        );
+        )].find(isElementVisible);
 
         let launcher = document.getElementById(LAUNCHER_ID);
+        const nativeFallback = !factionButton && isPdaWebChatSuppressed();
 
-        // Mobile Chat 3.1 can collapse chat launchers into a grouped menu.
-        // When the faction anchor is absent/hidden, do not recreate FLUX as a
-        // detached floating button. It should disappear with Torn's group and
-        // reappear when that grouped UI is opened again.
-        if (!factionButton || !isElementVisible(factionButton)) {
-            if (isMobileLayout()) removeLauncherNode(launcher);
+        // Follow Torn's grouped menu while web chat is available. PDA's blocked
+        // web chat needs its own dock because its native controls are outside
+        // the webpage and cannot host a userscript button.
+        if (!factionButton && !nativeFallback) {
+            if (isMobileLayout() || launcher?.dataset.pdaChatLauncher === '1') removeLauncherNode(launcher);
             return;
         }
 
-        const factionWrapper = factionButton.parentElement;
-        const controlsContainer = factionWrapper?.parentElement;
+        const factionWrapper = factionButton?.parentElement || null;
+        let controlsContainer = factionWrapper?.parentElement;
 
-        if (!factionWrapper || !controlsContainer) {
+        if (!nativeFallback && (!factionWrapper || !controlsContainer)) {
             if (isMobileLayout()) removeLauncherNode(launcher);
             return;
         }
+        if (nativeFallback) controlsContainer = getPdaLauncherDock();
 
         // In Torn's compact phone strip there may be no room for another icon.
         // In that state FLUX must remain hidden instead of overflowing/floating
         // off the right edge. Opening Torn's grouped-chat UI gives us a suitable
         // container and the observer/click hook will install it there.
-        if (!mobileContainerHasLauncherRoom(controlsContainer)) {
+        if (!nativeFallback && !mobileContainerHasLauncherRoom(controlsContainer)) {
             removeLauncherNode(launcher);
             return;
         }
@@ -3502,14 +3544,16 @@
         // Remove any previous/bad installation before moving to Torn's current
         // launcher/group container.
         removeLauncherNode(launcher);
+        // Removing the last fallback launcher also removes its empty dock.
+        if (nativeFallback) controlsContainer = getPdaLauncherDock();
 
         // Create a new sibling wrapper using Torn's own wrapper shell.
-        const wrapper = factionWrapper.cloneNode(false);
+        const wrapper = factionWrapper ? factionWrapper.cloneNode(false) : el('div');
         wrapper.removeAttribute('data-alliance-launcher-host');
         wrapper.dataset.allianceWrapper = '1';
 
         // Keep Torn's layout slot, but make our own click surface sit above its DnD layers.
-        wrapper.style.transition = factionWrapper.style.transition || 'transform linear';
+        wrapper.style.transition = factionWrapper?.style.transition || 'transform linear';
         wrapper.style.position = 'relative';
         wrapper.style.zIndex = '2147483646';
         wrapper.style.pointerEvents = 'auto';
@@ -3520,10 +3564,11 @@
         button.type = 'button';
         button.title = 'FLUX Chat';
         button.classList.remove('ac-launcher-floating');
+        if (nativeFallback) button.dataset.pdaChatLauncher = '1';
 
         // Absolute positioning keeps the Torn flex slot intact while ensuring the
         // clickable surface is above Torn's drag/drop overlays.
-        const factionRect = factionWrapper.getBoundingClientRect();
+        const factionRect = factionWrapper?.getBoundingClientRect() || { width: 40, height: 40 };
         const slotWidth = Math.max(40, factionRect.width || 40);
         const slotHeight = Math.max(40, factionRect.height || 40);
         wrapper.style.width = `${slotWidth}px`;
@@ -3586,9 +3631,7 @@
 
         wrapper.appendChild(button);
 
-        // Insert FLUX as its own Torn-style item immediately before Faction.
-        // On mobile this only happens when Torn's current container has space
-        // (normally the grouped-chat menu), never as a floating fallback.
+        // Use the faction slot when available, or append to PDA's shared dock.
         controlsContainer.insertBefore(wrapper, factionWrapper);
 
         updateBadge();
@@ -5114,14 +5157,17 @@
     // Torn is React-heavy and can rebuild the chat tree after navigation.
     // Re-running these functions is safe and restores only our launcher if needed.
     let observerQueued = false;
-    const observer = new MutationObserver(() => {
+    let observedChatRoot = null;
+    function queueLauncherInstall() {
         if (observerQueued) return;
         observerQueued = true;
         setTimeout(() => {
             observerQueued = false;
             installLauncher();
         }, 250);
-    });
+    }
+    const observer = new MutationObserver(queueLauncherInstall);
+    const chatVisibilityObserver = new MutationObserver(queueLauncherInstall);
     observer.observe(document.documentElement, { childList: true, subtree: true });
 
     // Torn Chat 3.1 may open/close the mobile grouped-chat UI mainly through
@@ -5196,6 +5242,7 @@
     });
 
     window.addEventListener('focus', () => {
+        installLauncher();
         refreshNotifyLeadership();
         wakePolling();
         checkForUserscriptUpdate();
