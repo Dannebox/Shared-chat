@@ -3,7 +3,7 @@
 // @namespace    almanac.shared.chat
 // @updateURL   https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
 // @downloadURL https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js
-// @version      0.1.74
+// @version      0.1.75
 // @description  Secure shared chat for approved Torn factions using CSP-safe HTTP polling; does not scrape Torn pages.
 // @match        https://www.torn.com/*
 // @match        https://torn.com/*
@@ -35,6 +35,7 @@
     const POLL_CLOSED_MS = 10000;
     const MOBILE_MEDIA = '(max-width: 700px)';
     const UPDATE_URL = 'https://raw.githubusercontent.com/Dannebox/Shared-chat/main/Chat.user.js';
+    const SCRIPT_VERSION = '0.1.75';
     const UPDATE_CHECK_KEY = 'alliance_chat_update_check_v2';
     const UPDATE_AVAILABLE_KEY = 'alliance_chat_update_available_v1';
     const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
@@ -180,7 +181,7 @@
         factionNames: {},
         theme: THEMES.has(GM_getValue(THEME_KEY, 'default')) ? GM_getValue(THEME_KEY, 'default') : 'default',
         externalImagePreviews: GM_getValue(IMAGE_PREVIEW_KEY, false) === true,
-        updateAvailable: GM_getValue(UPDATE_AVAILABLE_KEY, ''),
+        updateAvailable: newerUserscriptVersion(GM_getValue(UPDATE_AVAILABLE_KEY, '')),
         historyLoaded: 0,
         oldestHistorySeq: 0,
         historyLoading: false,
@@ -1646,10 +1647,8 @@
     }
 
     function currentUserscriptVersion() {
-        return String(
-            globalThis.GM_info?.script?.version ||
-            '0.1.61'
-        );
+        // PDA may expose GM_info without this script's metadata.
+        return SCRIPT_VERSION;
     }
 
     function compareVersions(a, b) {
@@ -1664,6 +1663,11 @@
             if (av < bv) return -1;
         }
         return 0;
+    }
+
+    function newerUserscriptVersion(version) {
+        const latest = String(version || '').trim();
+        return latest && compareVersions(latest, currentUserscriptVersion()) > 0 ? latest : '';
     }
 
     function renderConnectionState(label = 'Connected') {
@@ -1688,6 +1692,8 @@
     async function checkForUserscriptUpdate(force = false) {
         const now = Date.now();
         const saved = GM_getValue(UPDATE_CHECK_KEY, null);
+        // Clear obsolete notices before a network request, including offline starts.
+        GM_setValue(UPDATE_AVAILABLE_KEY, state.updateAvailable);
 
         if (
             !force &&
@@ -1697,10 +1703,7 @@
             now - saved.checkedAt < UPDATE_CHECK_INTERVAL_MS
         ) {
             const cachedVersion = String(saved.latestVersion || '');
-            state.updateAvailable =
-                cachedVersion && compareVersions(cachedVersion, currentUserscriptVersion()) > 0
-                    ? cachedVersion
-                    : '';
+            state.updateAvailable = newerUserscriptVersion(cachedVersion);
             GM_setValue(UPDATE_AVAILABLE_KEY, state.updateAvailable);
             renderConnectionState();
             return;
@@ -1736,10 +1739,7 @@
                 latestVersion
             });
 
-            state.updateAvailable =
-                latestVersion && compareVersions(latestVersion, currentUserscriptVersion()) > 0
-                    ? latestVersion
-                    : '';
+            state.updateAvailable = newerUserscriptVersion(latestVersion);
 
             GM_setValue(UPDATE_AVAILABLE_KEY, state.updateAvailable);
             renderConnectionState();
@@ -5092,7 +5092,7 @@
 
         GM_addValueChangeListener(UPDATE_AVAILABLE_KEY, (_name, _oldValue, newValue, remote) => {
             if (!remote) return;
-            state.updateAvailable = String(newValue || '');
+            state.updateAvailable = newerUserscriptVersion(newValue);
             renderConnectionState();
         });
 
